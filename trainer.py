@@ -238,10 +238,14 @@ def train_real(cfg, run):
     log(f"dataset sources: {[(n, Path(p).name) for n, p in sources]}")
     all_samples = []          # (src_name, text)
     failed = []
+    max_s = int(cfg.get("max_samples") or 0)
     for sname, spath in sources:
         try:
-            for s in parse_dataset(Path(spath), tok, cfg["max_seq"]):
-                all_samples.append((sname, s))
+            s_list = parse_dataset(Path(spath), tok, cfg["max_seq"])
+            if max_s:
+                s_list = s_list[:max_s]
+            all_samples.extend((sname, s) for s in s_list)
+            log(f"source ok: {sname} — {len(s_list)} samples")
         except Exception as e:
             failed.append((sname, str(e)[:120]))
             log(f"source FAILED, excluded: {sname} — {e}")

@@ -839,6 +839,7 @@ $("#ai-start").addEventListener("click", async () => {
         save_steps: +$("#cfg-save").value || 100,
         save_minutes: +$("#cfg-savemin").value || 0,
         keep_ckpts: +$("#cfg-keepck").value || 2,
+        max_samples: +$("#cfg-maxsamp").value || 0,
         ckpt_upload: true,
         ollama_import: $("#cfg-ollama").checked,
         ollama_name: $("#cfg-ollama-name").value.trim() || $("#cfg-name").value.trim(),

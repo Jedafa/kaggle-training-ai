@@ -135,6 +135,7 @@ def launch_training(body):
         "save_steps": int(body.get("save_steps") or 100),
         "save_minutes": float(body.get("save_minutes") or 0) or None,
         "keep_ckpts": int(body.get("keep_ckpts") or 2),
+        "max_samples": int(body.get("max_samples") or 5000),
         "ckpt_upload": bool(body.get("ckpt_upload", True)),
         "resume_from": str(body.get("resume_from") or "").strip() or None,
         "gguf_outtype": body.get("gguf_outtype") if body.get("gguf_outtype") in ("q8_0", "f16") else "q8_0",
