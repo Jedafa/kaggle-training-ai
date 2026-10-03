@@ -176,6 +176,13 @@ async def fetch_model_ids(sess, url, headers):
     return []
 
 
+def _raw_snip(data):
+    try:
+        return json.dumps(data, ensure_ascii=False)[:250]
+    except Exception:
+        return str(data)[:250]
+
+
 def extract_content(data):
     """Pull the text out of an OpenAI-compatible or ollama-native response.
     Surfaces provider errors (OpenRouter returns 200 + error object sometimes)
@@ -187,20 +194,23 @@ def extract_content(data):
         raise ValueError(f"API error{(' [' + str(code) + ']') if code else ''}: {msg}")
     ch = data.get("choices")
     if ch:
-        msg0 = (ch[0] or {}).get("message") or {}
-        c = msg0.get("content")
-        if c:
+        msg0 = (ch[0] or {}) if isinstance(ch[0], dict) else {}
+        m0 = msg0.get("message") or {}
+        c = m0.get("content")
+        if isinstance(c, str) and c.strip():
             return c
-        if msg0.get("reasoning"):
+        if m0.get("reasoning"):
             # thinking models put the final JSON inside the reasoning text — mine it
-            return msg0["reasoning"]
-        if ch[0] and (ch[0] or {}).get("finish_reason") == "error":
-            raise ValueError("provider failed to generate — try another model on this API")
+            return m0["reasoning"]
+        if msg0.get("finish_reason") == "error":
+            raise ValueError("provider failed to generate — try another model on this API. raw: "
+                             + _raw_snip(data))
+        raise ValueError("empty message content (finish_reason=%s) — raw: %s"
+                         % (msg0.get("finish_reason"), _raw_snip(data)))
     msg = data.get("message")  # ollama native /api/chat
     if isinstance(msg, dict) and msg.get("content"):
         return msg["content"]
-    raise ValueError("response has no message content — check the model name on this API "
-                     "(e.g. OpenRouter needs full ids like 'deepseek/deepseek-chat-v3.1:free')")
+    raise ValueError("response has no message content — raw response: " + _raw_snip(data))
 
 
 def parse_items(text):
