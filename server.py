@@ -442,9 +442,13 @@ def collect_status():
 
 
 # ---------------------------------------------------------------- routes
+BUILD_ID = secrets.token_hex(4)
+
+
 async def index(request):
-    return web.FileResponse(STATIC / "index.html",
-                            headers={"Cache-Control": "no-store"})
+    html = (STATIC / "index.html").read_text().replace("__BUILD__", BUILD_ID)
+    return web.Response(text=html, content_type="text/html",
+                        headers={"Cache-Control": "no-store"})
 
 
 async def api_login(request):
