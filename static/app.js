@@ -561,6 +561,15 @@ function renderTrain(d) {
   $("#train-badge").className = badgeFor(status);
   $("#btn-train-start").classList.toggle("hidden", active);
   $("#btn-train-stop").classList.toggle("hidden", !active);
+  const PH = { prepare: "⬇", training: "⚡", merging: "⚙", gguf: "⛁", ollama: "🦙", hf_upload: "⬆", stopping: "⏹" };
+  const icon = PH[st.phase] || "•";
+  const now = $("#train-now");
+  if (st.message) {
+    now.textContent = icon + " " + st.message;
+    now.style.color = status === "error" ? "var(--coral)" : (status === "done" ? "var(--pulse)" : "var(--fog)");
+  } else if (!active) {
+    now.textContent = "—";
+  }
   $("#p-step").textContent = `${st.step || 0} / ${st.total_steps || 0}`;
   $("#p-loss").textContent = st.loss != null ? st.loss.toFixed(4) : "—";
   $("#p-lr").textContent = st.lr ? st.lr.toExponential(1) : "—";
