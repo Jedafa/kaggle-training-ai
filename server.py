@@ -387,6 +387,7 @@ def write_env_file(data: dict):
     lines.append("CF_DOMAIN=" + sh_quote(pick("cf_domain", "CF_DOMAIN")))
     lines.append("TUNNEL_UUID=" + sh_quote(pick("tunnel_uuid", "TUNNEL_UUID")))
     lines.append("HF_TOKEN=" + sh_quote(pick("hf_token", "HF_TOKEN")))
+    lines.append("HF_USER=" + sh_quote(pick("hf_user", "HF_USER")))
     ENV_FILE.write_text("\n".join(lines) + "\n")
 
     uuid = pick("tunnel_uuid", "TUNNEL_UUID")
@@ -491,6 +492,7 @@ async def api_env_get(request):
         "cf_domain": v.get("CF_DOMAIN") or "",
         "tunnel_uuid": v.get("TUNNEL_UUID") or "",
         "hf_token_set": bool(v.get("HF_TOKEN")),
+        "hf_user": v.get("HF_USER") or "",
         "mode": "token" if v.get("CF_TOKEN") else ("config" if v.get("TUNNEL_UUID") else "quick"),
     })
 

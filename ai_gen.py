@@ -17,6 +17,8 @@ from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout, web
 
+from train_api import env_vars
+
 BASE = Path.home() / ".kaggle-panel"
 GEN = BASE / "ai_gen"
 UPLOADS = BASE / "uploads"
@@ -295,14 +297,15 @@ async def generate_job(cfg):
 def save_ds_hf(cfg, run_state_writer, ds_path, count):
     """Push the generated dataset to a private HF dataset repo. Never raises."""
     tok = cfg.get("hf_token") or os.environ.get("HF_TOKEN", "")
+    user = cfg.get("hf_user") or os.environ.get("HF_USER", "")
     if not tok:
         run_state_writer(ds_hf_error="no HF token — dataset kept local")
         return
     try:
         from huggingface_hub import HfApi
         api = HfApi(token=tok)
-        who = api.whoami()["name"]
-        repo = f"{who}/{cfg['slug']}-dataset"
+        repo_user = user or (api.whoami()["name"] if not user else user)
+        repo = f"{repo_user}/{cfg['slug']}-dataset"
         api.create_repo(repo, repo_type="dataset", exist_ok=True, private=True)
         api.upload_file(path_or_fileobj=str(ds_path), path_in_repo="dataset.jsonl",
                         repo_id=repo, repo_type="dataset",
@@ -346,6 +349,7 @@ async def api_ai_start(request):
         "auto_train": bool(body.get("auto_train", False)),
         "save_ds_hf": bool(body.get("save_ds_hf", True)),
         "hf_token": str(body.get("hf_token") or "").strip(),
+        "hf_user": env_vars().get("HF_USER", ""),
         "train": body.get("train") or {},
     }
     _job["stop"] = False

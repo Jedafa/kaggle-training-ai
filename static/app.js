@@ -27,7 +27,7 @@ const I18N = {
     f_token: "Tunnel token", f_domain: "Domain", f_uuid: "Tunnel UUID", f_creds: "Credentials JSON",
     hint_token: "Domain is configured in the Cloudflare Zero Trust dashboard → Public hostname → service http://localhost:PORT",
     btn_tunnel_start: "Start tunnel", btn_tunnel_stop: "Stop", set_panel: "Panel & services",
-    f_port: "Panel port", f_pass: "Panel password", f_hftoken: "HuggingFace token",
+    f_port: "Panel port", f_pass: "Panel password", f_hftoken: "HuggingFace token", f_hfuser: "HuggingFace username",
     save: "Save", btn_update: "Update panel (git pull)",
     rail_server: "server", rail_training: "training",
     cpu: "CPU", ram: "Memory", disk: "Disk", load: "Load", uptime: "Uptime", host: "Host",
@@ -82,7 +82,7 @@ const I18N = {
     f_token: "Токен туннеля", f_domain: "Домен", f_uuid: "UUID туннеля", f_creds: "JSON учётных данных",
     hint_token: "Домен настраивается в панели Cloudflare Zero Trust → Public hostname → service http://localhost:ПОРТ",
     btn_tunnel_start: "Запустить туннель", btn_tunnel_stop: "Остановить", set_panel: "Панель и сервисы",
-    f_port: "Порт панели", f_pass: "Пароль панели", f_hftoken: "HuggingFace токен",
+    f_port: "Порт панели", f_pass: "Пароль панели", f_hftoken: "HuggingFace токен", f_hfuser: "HuggingFace ник",
     save: "Сохранить", btn_update: "Обновить панель (git pull)",
     rail_server: "сервер", rail_training: "обучение",
     cpu: "Процессор", ram: "Память", disk: "Диск", load: "Нагрузка", uptime: "Время работы", host: "Хост",
@@ -137,7 +137,7 @@ const I18N = {
     f_token: "隧道 Token", f_domain: "域名", f_uuid: "隧道 UUID", f_creds: "凭据 JSON",
     hint_token: "域名需在 Cloudflare Zero Trust 控制台配置 → Public hostname → service http://localhost:端口",
     btn_tunnel_start: "启动隧道", btn_tunnel_stop: "停止", set_panel: "面板与服务",
-    f_port: "面板端口", f_pass: "面板密码", f_hftoken: "HuggingFace 令牌",
+    f_port: "面板端口", f_pass: "面板密码", f_hftoken: "HuggingFace 令牌", f_hfuser: "HuggingFace 用户名",
     save: "保存", btn_update: "更新面板 (git pull)",
     rail_server: "服务器", rail_training: "训练",
     cpu: "处理器", ram: "内存", disk: "磁盘", load: "负载", uptime: "运行时间", host: "主机",
@@ -369,6 +369,7 @@ async function loadSettings() {
     $("#env-port").value = d.panel_port || "7860";
     state.portBefore = d.panel_port || "7860";
     $("#env-pass").value = ""; $("#env-hf").value = "";
+    $("#env-hfuser").value = d.hf_user || "";
     $("#env-hf").placeholder = d.hf_token_set ? "•••• (saved)" : "hf_...";
     $("#hf-state").textContent = d.hf_token_set ? t("hf_set") : t("hf_unset");
     $("#hf-state").className = "badge " + (d.hf_token_set ? "b-green" : "");
@@ -391,10 +392,13 @@ $("#env-save").addEventListener("click", async () => {
     panel_port: $("#env-port").value.trim() || "7860",
     panel_password: $("#env-pass").value.trim(),
     hf_token: $("#env-hf").value.trim() || "__KEEP__",
+    hf_user: $("#env-hfuser").value.trim() || "__KEEP__",
   };
   if (body.cf_token === "__KEEP__") delete body.cf_token;
   if (body.credentials === "__KEEP__") delete body.credentials;
   if (body.hf_token === "__KEEP__") delete body.hf_token;
+  if (body.hf_user === "__KEEP__") delete body.hf_user;
+  if (body.hf_user === "__KEEP__") delete body.hf_user;
   try {
     const d = await apiPost("/api/env", body);
     if (d.token) { state.token = d.token; localStorage.setItem("panel_token", d.token); }

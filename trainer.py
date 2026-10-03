@@ -412,12 +412,16 @@ def _hf_api(tok):
 
 def hf_repo_id(cfg, run):
     tok = cfg.get("hf_token") or os.environ.get("HF_TOKEN", "")
+    user = cfg.get("hf_user") or os.environ.get("HF_USER", "")
     repo = cfg.get("hf_repo")
-    if not repo and tok:
-        try:
-            repo = f"{_hf_api(tok).whoami()['name']}/{cfg['run_name']}"
-        except Exception as e:
-            log(f"whoami failed ({e}) — set hf_repo manually in settings")
+    if not repo:
+        if user:
+            repo = user + "/" + cfg["run_name"]
+        elif tok:
+            try:
+                repo = _hf_api(tok).whoami()["name"] + "/" + cfg["run_name"]
+            except Exception as e:
+                log("whoami failed (%s) - set HF username in Settings" % e)
     return tok, repo
 
 

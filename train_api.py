@@ -134,6 +134,7 @@ def launch_training(body):
         "hf_upload": bool(body.get("hf_upload", False)),
         "hf_repo": str(body.get("hf_repo") or "").strip() or None,
         "hf_token": str(body.get("hf_token") or "").strip() or env_vars().get("HF_TOKEN", ""),
+        "hf_user": str(body.get("hf_user") or "").strip() or env_vars().get("HF_USER", ""),
         "created_at": time.time(),
     }
     d = run_dir(name)
