@@ -103,6 +103,7 @@
           <div class="row wrap" style="margin-bottom:12px">
             <button class="chip active" id="ds-mode-url" data-i18n="ds_link">Link</button>
             <button class="chip" id="ds-mode-file" data-i18n="ds_file">File</button>
+            <button class="chip" id="ds-mode-hf">HuggingFace</button>
             <span id="ds-info" class="badge"></span>
           </div>
           <div class="field" id="ds-url-wrap">
@@ -116,6 +117,14 @@
             <span id="ds-file-name" class="muted small">—</span>
             <button class="btn btn-ghost hidden" id="ds-push" style="padding:4px 10px;font-size:12px"><span data-i18n="ds_push">↑ HF</span></button>
             <a id="ds-hf-link" class="hidden" target="_blank" rel="noopener" style="font-size:12px;color:var(--lavender)"></a>
+          </div>
+          <div class="hidden" id="ds-hf-wrap">
+            <div class="field"><textarea id="ds-hf-repos" rows="3" placeholder="jedafa/my-dataset&#10;user/other-dataset&#10;public-dataset-name" spellcheck="false"></textarea></div>
+            <div class="row wrap" style="margin-bottom:8px">
+              <button class="btn btn-ghost" id="ds-hf-check" style="padding:6px 12px"><span data-i18n="ds_hf_check">Check repos</span></button>
+              <span class="small muted" data-i18n="ds_hf_hint">one repo per line · green = ready for training · red = will be excluded</span>
+            </div>
+            <div id="ds-hf-list" class="kv"></div>
           </div>
         </div>
 

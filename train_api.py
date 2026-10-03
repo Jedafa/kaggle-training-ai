@@ -9,6 +9,9 @@ import subprocess
 import sys
 import time
 import zipfile
+import asyncio
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 from aiohttp import web
@@ -109,6 +112,11 @@ def launch_training(body):
         if not p.exists():
             return False, {"error": "dataset_not_found", "status": 400}
         value = str(p)
+    elif dstype == "hf":
+        repos = [x.strip() for x in re.split(r"[,;\n]+", value) if x.strip()]
+        if not repos:
+            return False, {"error": "no HF dataset repos given", "status": 400}
+        value = ",".join(repos)
     else:
         return False, {"error": "dataset_type must be url|file", "status": 400}
 
@@ -117,6 +125,7 @@ def launch_training(body):
         "base_model": str(body.get("base_model") or "unsloth/Llama-3.2-3B-Instruct").strip(),
         "dataset_type": dstype,
         "dataset_value": value,
+        "hf_datasets": ([x.strip() for x in re.split(r"[,;\n]+", value)] if dstype == "hf" else []),
         "epochs": float(body.get("epochs") or 3),
         "lr": float(body.get("lr") or 2e-4),
         "batch_size": int(body.get("batch_size") or 2),
@@ -325,6 +334,67 @@ async def api_train_download(request):
         "Content-Disposition": f'attachment; filename="{name}-model.zip"'})
 
 
+HF_BASE = "https://huggingface.co"
+DATA_EXT = (".jsonl", ".json", ".csv", ".parquet", ".txt")
+
+
+def _hf_headers(token=None):
+    h = {"User-Agent": "kaggle-training-ai"}
+    if token:
+        h["Authorization"] = "Bearer " + token
+    return h
+
+
+def hf_dataset_info(repo, token=None):
+    """Inspect an HF dataset repo via REST (no SDK needed). Green/red verdict."""
+    repo = str(repo or "").strip()
+    if repo.startswith("datasets/"):
+        repo = repo[len("datasets/"):]
+    repo = repo.strip("/")
+    if not repo or "/" not in repo:
+        return {"repo": repo, "ok": False, "files": [], "error": "expected format: user/dataset-name"}
+    try:
+        req = urllib.request.Request(HF_BASE + "/api/datasets/" + repo, headers=_hf_headers(token))
+        with urllib.request.urlopen(req, timeout=20) as r:
+            json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return {"repo": repo, "ok": False, "files": [], "error": "private/gated dataset — HF token required in Settings"}
+        if e.code == 404:
+            return {"repo": repo, "ok": False, "files": [], "error": "not found on HuggingFace"}
+        return {"repo": repo, "ok": False, "files": [], "error": "HTTP %d" % e.code}
+    except Exception as e:
+        return {"repo": repo, "ok": False, "files": [], "error": str(e)[:200]}
+    try:
+        req2 = urllib.request.Request(HF_BASE + "/api/datasets/" + repo + "/tree/main?recursive=true",
+                                      headers=_hf_headers(token))
+        with urllib.request.urlopen(req2, timeout=25) as r:
+            tree = json.loads(r.read().decode())
+        files = [f["path"] for f in tree
+                 if isinstance(f, dict) and f.get("type") == "file"
+                 and f["path"].lower().endswith(DATA_EXT)]
+    except Exception as e:
+        return {"repo": repo, "ok": False, "files": [], "error": "tree listing: " + str(e)[:150]}
+    if not files:
+        return {"repo": repo, "ok": True, "files": [],
+                "error": "repo exists but has no data files (jsonl/json/csv/parquet/txt)"}
+    return {"repo": repo, "ok": True, "files": files[:20], "error": None}
+
+
+async def api_ds_hf_check(request):
+    body = await request.json()
+    repos = body.get("repos") or []
+    if isinstance(repos, str):
+        repos = [x.strip() for x in re.split(r"[,;\n]+", repos) if x.strip()]
+    if not repos:
+        return web.json_response({"error": "no repos given"}, status=400)
+    tok = env_vars().get("HF_TOKEN", "")
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(
+        None, lambda: [hf_dataset_info(r, tok) for r in repos[:20]])
+    return web.json_response({"ok": True, "results": results})
+
+
 def register_train_routes(app):
     app.router.add_post("/api/train/start", api_train_start)
     app.router.add_post("/api/train/stop", api_train_stop)
@@ -335,3 +405,4 @@ def register_train_routes(app):
     app.router.add_post("/api/train/delete", api_train_delete)
     app.router.add_post("/api/train/command", api_train_command)
     app.router.add_post("/api/ds/push", api_ds_push)
+    app.router.add_post("/api/ds/hf_check", api_ds_hf_check)

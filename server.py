@@ -633,7 +633,9 @@ def make_app():
     app.router.add_route("*", "/ollama", ollama_proxy)
     train_api.register_train_routes(app)
     ai_gen.register_ai_routes(app)
-    app.on_startup.append(lambda _app: ai_gen.mark_interrupted_on_start())
+    async def _ai_gen_start(_app):
+        ai_gen.mark_interrupted_on_start()
+    app.on_startup.append(_ai_gen_start)
     return app
 
 

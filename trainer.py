@@ -87,6 +87,55 @@ def fetch_dataset(cfg):
     return p
 
 
+HF_BASE = "https://huggingface.co"
+DATA_EXT = (".jsonl", ".json", ".csv", ".parquet", ".txt")
+
+
+def hf_download_dataset(repo, token, dest_dir):
+    """Download all data files of an HF dataset repo via direct resolve URLs."""
+    import urllib.request
+    import urllib.error
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    hdr = {"User-Agent": "kaggle-training-ai"}
+    if token:
+        hdr["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(f"{HF_BASE}/api/datasets/{repo}/tree/main?recursive=true", headers=hdr)
+    with urllib.request.urlopen(req, timeout=30) as r:
+        tree = json.loads(r.read().decode())
+    files = [f["path"] for f in tree
+             if isinstance(f, dict) and f.get("type") == "file"
+             and f["path"].lower().endswith(DATA_EXT)]
+    if not files:
+        raise RuntimeError(f"no data files in {repo}")
+    got = []
+    for path in files:
+        safe = re.sub(r"[^A-Za-z0-9._/-]", "_", path)
+        out = dest_dir / safe.replace("/", "__")
+        url = f"{HF_BASE}/datasets/{repo}/resolve/main/{path}"
+        log(f"hf: downloading {repo}/{path}")
+        req2 = urllib.request.Request(url, headers=hdr)
+        with urllib.request.urlopen(req2, timeout=120) as r, out.open("wb") as f:
+            shutil.copyfileobj(r, f)
+        got.append(out)
+    return got
+
+
+def collect_sources(cfg):
+    """Return a list of (name, local_path) for every dataset source, HF ones downloaded."""
+    tok = cfg.get("hf_token") or os.environ.get("HF_TOKEN", "")
+    out = []
+    ds_list = cfg.get("hf_datasets") or []
+    if cfg.get("dataset_type") == "hf" and ds_list:
+        for repo in ds_list:
+            for f in hf_download_dataset(repo, tok, BASE / "uploads" / "hf"):
+                out.append((repo, f))
+        return out
+    name = {"url": "downloaded", "file": Path(cfg["dataset_value"]).name,
+            "hf": ",".join(ds_list)}.get(cfg["dataset_type"], "dataset")
+    return [(name, fetch_dataset(cfg))]
+
+
 def item_to_text(it, tokenizer):
     if not isinstance(it, dict):
         return str(it)
@@ -185,16 +234,66 @@ def train_real(cfg, run):
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
-    samples = parse_dataset(fetch_dataset(cfg), tok, cfg["max_seq"])
-    log(f"dataset samples: {len(samples)}")
-    blocks = build_blocks(samples, tok, cfg["max_seq"])
+    sources = collect_sources(cfg)
+    log(f"dataset sources: {[(n, Path(p).name) for n, p in sources]}")
+    all_samples = []          # (src_name, text)
+    failed = []
+    for sname, spath in sources:
+        try:
+            for s in parse_dataset(Path(spath), tok, cfg["max_seq"]):
+                all_samples.append((sname, s))
+        except Exception as e:
+            failed.append((sname, str(e)[:120]))
+            log(f"source FAILED, excluded: {sname} — {e}")
+    if not all_samples:
+        raise RuntimeError("all dataset sources failed to parse: " + "; ".join(f"{n}: {e}" for n, e in failed))
+    ok_srcs = sorted({n for n, _ in all_samples})
+    log(f"usable sources: {ok_srcs}; samples: {len(all_samples)}; failed: {failed}")
+
+    # pack blocks keeping their source for position tracking
+    blocks = []
+    src_of_block = []
+    ids = []
+    cur_src = None
+    eos = tok.eos_token_id or 0
+    for sname, s in all_samples:
+        if cur_src is not None and sname != cur_src:
+            if len(ids) >= cfg["max_seq"]:
+                blocks.append(ids[:cfg["max_seq"]]); src_of_block.append(cur_src)
+            ids = []
+        cur_src = sname
+        ids.extend(tok(s, add_special_tokens=True, truncation=True,
+                       max_length=cfg["max_seq"])["input_ids"])
+        ids.append(eos)
+        while len(ids) >= cfg["max_seq"]:
+            blocks.append(ids[:cfg["max_seq"]]); src_of_block.append(cur_src)
+            ids = ids[cfg["max_seq"]:]
+    if len(ids) >= cfg["max_seq"] // 2:
+        blocks.append(ids[:cfg["max_seq"]]); src_of_block.append(cur_src)
     log(f"packed blocks (len={cfg['max_seq']}): {len(blocks)}")
     if not blocks:
         raise RuntimeError("dataset too small for one block — lower max_seq or add data")
-    total_steps = max(1, (len(blocks) * cfg["epochs"]) //
-                      max(1, cfg["batch_size"] * cfg["grad_accum"]))
-    run.set_state(message=f"{len(samples)} samples → {len(blocks)} blocks",
-                  total_steps=total_steps)
+
+    # step boundaries per source (epochs apply to the combined stream)
+    counts = {}
+    for b_src in src_of_block:
+        counts[b_src] = counts.get(b_src, 0) + 1
+    eff = max(1, cfg["batch_size"] * cfg["grad_accum"])
+    steps_per_src, acc = [], 0
+    for s in ok_srcs:
+        acc += max(1, round(counts.get(s, 0) * cfg["epochs"] / eff))
+        steps_per_src.append((s, acc))
+    def src_for_step(step):
+        for s, upto in steps_per_src:
+            if step <= upto:
+                return s
+        return ok_srcs[-1]
+    total_steps = max(1, (len(blocks) * cfg["epochs"]) // eff)
+    run.set_state(message=f"{len(all_samples)} samples → {len(blocks)} blocks",
+                  total_steps=total_steps,
+                  datasets_overview=[{"name": s, "blocks": counts.get(s, 0)} for s in ok_srcs],
+                  datasets_failed=[{"name": n, "error": e} for n, e in failed],
+                  current_dataset=ok_srcs[0])
 
     qconf = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                                bnb_4bit_compute_dtype=torch.float16,
@@ -239,6 +338,10 @@ def train_real(cfg, run):
                 run.progress_point(step, round(float(logs["loss"]), 4),
                                    float(logs.get("learning_rate", 0) or 0),
                                    round(float(logs.get("epoch", 0) or 0), 3))
+                try:
+                    run.set_state(current_dataset=src_for_step(step))
+                except NameError:
+                    pass
 
         def on_step_end(self, args, state, control, **kw):
             st = run.state
