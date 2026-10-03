@@ -482,7 +482,7 @@ async def api_ai_test(request):
             async with sess.post(chat_url, headers=headers, json={
                 "model": body.get("model") or "gpt-4o-mini",
                 "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
-                "max_tokens": 10, "stream": False}) as r:
+                "max_tokens": 512, "stream": False}) as r:
                 text = await r.text()
                 if r.status != 200:
                     return web.json_response({"ok": False, "error": f"HTTP {r.status}: {text[:200]}"})
@@ -491,11 +491,19 @@ async def api_ai_test(request):
                 except ValueError:
                     return web.json_response({"ok": False, "error":
                         "response is not JSON — URL must point to a chat completions endpoint"}, status=200)
-                try:
-                    reply = extract_content(data) or ""
-                except ValueError as e:
-                    return web.json_response({"ok": False, "error": str(e), "resolved": chat_url, "models": models[:20]})
-                return web.json_response({"ok": True, "reply": reply[:120], "resolved": chat_url, "models": models[:20]})
+                ch = data.get("choices")
+                msg = (ch[0].get("message") if ch and isinstance(ch[0], dict) else None) or data.get("message") or {}
+                content = msg.get("content")
+                reasoning = msg.get("reasoning_content") or msg.get("reasoning")
+                if isinstance(content, str) and content.strip():
+                    return web.json_response({"ok": True, "reply": content[:120],
+                                              "resolved": chat_url, "models": models[:20]})
+                if isinstance(reasoning, str) and reasoning.strip():
+                    # reasoning model: the API works, it just thinks before answering
+                    return web.json_response({"ok": True, "reply": "(reasoning model) " + reasoning[:100],
+                                              "resolved": chat_url, "models": models[:20]})
+                return web.json_response({"ok": False, "error": "no content in response — raw: " + _raw_snip(data),
+                                          "resolved": chat_url, "models": models[:20]})
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)[:250]})
 
