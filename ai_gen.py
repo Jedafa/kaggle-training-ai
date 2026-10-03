@@ -104,18 +104,30 @@ def normalize_url(u):
 
 
 def extract_content(data):
-    """Pull the text out of an OpenAI-compatible or ollama-native response."""
+    """Pull the text out of an OpenAI-compatible or ollama-native response.
+    Surfaces provider errors (OpenRouter returns 200 + error object sometimes)
+    and reasoning-only responses with a clear hint."""
+    if isinstance(data, dict) and data.get("error"):
+        e = data["error"]
+        msg = e.get("message") if isinstance(e, dict) else str(e)
+        code = e.get("code") if isinstance(e, dict) else None
+        raise ValueError(f"API error{(' [' + str(code) + ']') if code else ''}: {msg}")
     ch = data.get("choices")
     if ch:
-        msg = (ch[0] or {}).get("message") or {}
-        c = msg.get("content")
+        msg0 = (ch[0] or {}).get("message") or {}
+        c = msg0.get("content")
         if c:
             return c
+        if msg0.get("reasoning"):
+            raise ValueError("model returned only reasoning tokens (content is null) — "
+                             "use a non-reasoning model for dataset generation")
+        if ch[0] and (ch[0] or {}).get("finish_reason") == "error":
+            raise ValueError("provider failed to generate — try another model on this API")
     msg = data.get("message")  # ollama native /api/chat
     if isinstance(msg, dict) and msg.get("content"):
         return msg["content"]
-    raise ValueError("response has no message content — API URL must end with "
-                     "/v1/chat/completions (OpenAI-style) or /api/chat (ollama)")
+    raise ValueError("response has no message content — check the model name on this API "
+                     "(e.g. OpenRouter needs full ids like 'deepseek/deepseek-chat-v3.1:free')")
 
 
 def parse_items(text):
