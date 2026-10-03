@@ -385,7 +385,31 @@ def item_to_text(it, tokenizer):
             return tokenizer.apply_chat_template(msgs, tokenize=False)
         except Exception:
             pass
-    ins = low.get("instruction") or low.get("prompt") or low.get("question") or low.get("input") or ""
+    # ShareGPT-style: conversations: [{from: human/gpt/system, value: ...}]
+    conv = low.get("conversations")
+    if isinstance(conv, list) and conv and isinstance(conv[0], dict):
+        role_map = {"human": "user", "user": "user", "gpt": "assistant",
+                    "assistant": "assistant", "chatgpt": "assistant",
+                    "bard": "assistant", "bing": "assistant", "system": "system"}
+        mapped = []
+        conv_ok = True
+        for turn in conv:
+            if not isinstance(turn, dict):
+                conv_ok = False
+                break
+            role = str(turn.get("from") or turn.get("role") or "").lower()
+            content = turn.get("value") or turn.get("content") or ""
+            role = role_map.get(role)
+            if not role or not content:
+                conv_ok = False
+                break
+            mapped.append({"role": role, "content": str(content)})
+        if conv_ok and len(mapped) >= 2:
+            try:
+                return tokenizer.apply_chat_template(mapped, tokenize=False)
+            except Exception:
+                pass
+    ins = low.get("instruction") or low.get("prompt") or low.get("question") or low.get("query") or low.get("input") or ""
     out = low.get("output") or low.get("response") or low.get("answer") or low.get("completion") or ""
     if ins and out:
         try:
