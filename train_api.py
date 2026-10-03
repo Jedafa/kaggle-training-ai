@@ -158,14 +158,26 @@ def launch_training(body):
     env = os.environ.copy()
     if cfg["hf_token"]:
         env["HF_TOKEN"] = cfg["hf_token"]
+    gpu_count = 0
+    try:
+        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=10)
+        gpu_count = len([l for l in out.stdout.splitlines() if l.strip().startswith("GPU")])
+    except Exception:
+        gpu_count = 0
+    if gpu_count >= 2 and not env.get("TRAINER_FAKE"):
+        cmd = [sys.executable, "-m", "accelerate", "launch", "--num_processes", str(gpu_count),
+               "--multi_gpu", str(TRAINER), "--config", str(d / "train_config.json")]
+        note = f"{gpu_count} GPUs data-parallel (DDP)"
+    else:
+        cmd = [sys.executable, str(TRAINER), "--config", str(d / "train_config.json")]
+        note = "single process"
     proc = subprocess.Popen(
-        [sys.executable, str(TRAINER), "--config", str(d / "train_config.json")],
-        stdout=open(d / "train.log", "ab"), stderr=subprocess.STDOUT,
+        cmd, stdout=open(d / "train.log", "ab"), stderr=subprocess.STDOUT,
         start_new_session=True, env=env, cwd=str(PANEL_DIR))
     _live[name] = proc
     write_state(name, {"status": "preparing", "phase": "prepare", "pid": proc.pid,
                        "error": None, "message": "trainer started (ollama stopped to free VRAM)"})
-    return True, {"ok": True, "run": name, "note": "ollama stopped for training"}
+    return True, {"ok": True, "run": name, "note": "ollama stopped · " + note}
 
 
 async def api_train_start(request):

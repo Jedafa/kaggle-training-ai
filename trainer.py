@@ -30,6 +30,8 @@ def log(m):
 
 
 class Run:
+    main_rank = True
+
     def __init__(self, cfg):
         self.cfg = cfg
         self.dir = Path(cfg["_run_dir"])
@@ -58,6 +60,8 @@ class Run:
         sys.exit(0)
 
     def set_state(self, **kw):
+        if not self.main_rank:
+            return  # in DDP only rank 0 owns the state file
         self.state.update(kw)
         self.state["updated_at"] = time.time()
         tmp = self.state_file.with_suffix(".tmp")
@@ -65,6 +69,8 @@ class Run:
         tmp.replace(self.state_file)
 
     def progress_point(self, step, loss, lr, epoch):
+        if not self.main_rank:
+            return
         with self.progress_file.open("a") as f:
             f.write(json.dumps({"step": step, "loss": loss, "lr": lr,
                                 "epoch": epoch, "ts": time.time()}) + "\n")
@@ -91,12 +97,8 @@ HF_BASE = "https://huggingface.co"
 DATA_EXT = (".jsonl", ".json", ".csv", ".parquet", ".txt")
 
 
-def hf_download_dataset(repo, token, dest_dir):
-    """Download all data files of an HF dataset repo via direct resolve URLs."""
+def hf_list_dataset_files(repo, token):
     import urllib.request
-    import urllib.error
-    dest_dir = Path(dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
     hdr = {"User-Agent": "kaggle-training-ai"}
     if token:
         hdr["Authorization"] = "Bearer " + token
@@ -108,32 +110,67 @@ def hf_download_dataset(repo, token, dest_dir):
              and f["path"].lower().endswith(DATA_EXT)]
     if not files:
         raise RuntimeError(f"no data files in {repo}")
+    return files
+
+
+def hf_download_file(repo, path, out_path, token):
+    import urllib.request
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    hdr = {"User-Agent": "kaggle-training-ai"}
+    if token:
+        hdr["Authorization"] = "Bearer " + token
+    url = f"{HF_BASE}/datasets/{repo}/resolve/main/{path}"
+    log(f"hf: downloading {repo}/{path}")
+    req = urllib.request.Request(url, headers=hdr)
+    tmp = out_path.with_suffix(out_path.suffix + ".part")
+    with urllib.request.urlopen(req, timeout=600) as r, tmp.open("wb") as f:
+        shutil.copyfileobj(r, f)
+    tmp.replace(out_path)
+    return out_path
+
+
+def hf_download_dataset(repo, token, dest_dir):
+    """Download all data files of an HF dataset repo via direct resolve URLs."""
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
     got = []
-    for path in files:
+    for path in hf_list_dataset_files(repo, token):
         safe = re.sub(r"[^A-Za-z0-9._/-]", "_", path)
-        out = dest_dir / safe.replace("/", "__")
-        url = f"{HF_BASE}/datasets/{repo}/resolve/main/{path}"
-        log(f"hf: downloading {repo}/{path}")
-        req2 = urllib.request.Request(url, headers=hdr)
-        with urllib.request.urlopen(req2, timeout=120) as r, out.open("wb") as f:
-            shutil.copyfileobj(r, f)
-        got.append(out)
+        got.append(hf_download_file(repo, path, dest_dir / safe.replace("/", "__"), token))
     return got
 
 
-def collect_sources(cfg):
-    """Return a list of (name, local_path) for every dataset source, HF ones downloaded."""
+def collect_sources(cfg, rank=0):
+    """Return a list of (name, local_path) for every dataset source.
+    In DDP, rank 0 downloads; other ranks wait for the files to appear."""
     tok = cfg.get("hf_token") or os.environ.get("HF_TOKEN", "")
     out = []
     ds_list = cfg.get("hf_datasets") or []
     if cfg.get("dataset_type") == "hf" and ds_list:
         for repo in ds_list:
-            for f in hf_download_dataset(repo, tok, BASE / "uploads" / "hf"):
-                out.append((repo, f))
+            files = hf_list_dataset_files(repo, tok)  # every rank lists (cheap)
+            for path in files:
+                safe = re.sub(r"[^A-Za-z0-9._/-]", "_", path)
+                out_path = BASE / "uploads" / "hf" / safe.replace("/", "__")
+                if rank == 0:
+                    hf_download_file(repo, path, out_path, tok)
+                else:
+                    t0 = time.time()
+                    while not out_path.exists() and time.time() - t0 < 1200:
+                        time.sleep(5)
+                    if not out_path.exists():
+                        raise RuntimeError(f"waiting for {out_path.name} timed out")
+                out.append((repo, out_path))
         return out
     name = {"url": "downloaded", "file": Path(cfg["dataset_value"]).name,
             "hf": ",".join(ds_list)}.get(cfg["dataset_type"], "dataset")
-    return [(name, fetch_dataset(cfg))]
+    if rank == 0:
+        return [(name, fetch_dataset(cfg))]
+    t0 = time.time()
+    while not Path(cfg["dataset_value"]).exists() and time.time() - t0 < 1200:
+        time.sleep(5)
+    return [(name, Path(cfg["dataset_value"]))]
 
 
 def item_to_text(it, tokenizer):
@@ -221,7 +258,7 @@ class BlockDataset:
 
 
 # ---------------------------------------------------------------- real pipeline
-def train_real(cfg, run):
+def train_real(cfg, run, rank=0, world=1):
     import gc
     import torch
     from transformers import (AutoModelForCausalLM, AutoTokenizer, Trainer,
@@ -234,7 +271,7 @@ def train_real(cfg, run):
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
-    sources = collect_sources(cfg)
+    sources = collect_sources(cfg, rank)
     log(f"dataset sources: {[(n, Path(p).name) for n, p in sources]}")
     all_samples = []          # (src_name, text)
     failed = []
@@ -282,7 +319,7 @@ def train_real(cfg, run):
     counts = {}
     for b_src in src_of_block:
         counts[b_src] = counts.get(b_src, 0) + 1
-    eff = max(1, cfg["batch_size"] * cfg["grad_accum"])
+    eff = max(1, cfg["batch_size"] * cfg["grad_accum"] * world)
     steps_per_src, acc = [], 0
     for s in ok_srcs:
         acc += max(1, round(counts.get(s, 0) * cfg["epochs"] / eff))
@@ -293,7 +330,8 @@ def train_real(cfg, run):
                 return s
         return ok_srcs[-1]
     total_steps = max(1, (len(blocks) * cfg["epochs"]) // eff)
-    run.set_state(message=f"{len(all_samples)} samples → {len(blocks)} blocks",
+    run.set_state(message=f"{len(all_samples)} samples → {len(blocks)} blocks · {world} GPU",
+
                   total_steps=total_steps,
                   datasets_overview=[{"name": s, "blocks": counts.get(s, 0)} for s in ok_srcs],
                   datasets_failed=[{"name": n, "error": e} for n, e in failed],
@@ -302,8 +340,15 @@ def train_real(cfg, run):
     qconf = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                                bnb_4bit_compute_dtype=torch.float16,
                                bnb_4bit_use_double_quant=True)
+    if world > 1:
+        from accelerate import PartialState
+        dev = PartialState().device
+        log(f"DDP rank {rank}/{world} on {dev}")
+        placement = {"": dev}
+    else:
+        placement = "auto"
     model = AutoModelForCausalLM.from_pretrained(
-        cfg["base_model"], quantization_config=qconf, device_map="auto",
+        cfg["base_model"], quantization_config=qconf, device_map=placement,
         torch_dtype=torch.float16, attn_implementation="sdpa")
     model.config.use_cache = False
     model = prepare_model_for_kbit_training(model)
@@ -333,6 +378,8 @@ def train_real(cfg, run):
             self.last_time_save = time.time()
 
         def on_log(self, args, state, control, logs=None, **kw):
+            if rank != 0:
+                return
             if logs and "loss" in logs and not run.stopping:
                 step = state.global_step or 0
                 run.set_state(status="training", phase="train", step=step,
@@ -348,6 +395,8 @@ def train_real(cfg, run):
                     pass
 
         def on_step_end(self, args, state, control, **kw):
+            if rank != 0:
+                return
             st = run.state
             cmd = st.get("command")
             if cmd:
@@ -363,6 +412,8 @@ def train_real(cfg, run):
                 control.should_save = True
 
         def on_save(self, args, state, control, **kw):
+            if rank != 0:
+                return
             self.last_time_save = time.time()
             ckdir = Path(args.output_dir) / f"checkpoint-{state.global_step}"
             try:
@@ -404,10 +455,14 @@ def train_real(cfg, run):
     trainer.train()
 
     adapter_dir = run.dir / "adapter"
-    trainer.save_model(str(adapter_dir))
-    tok.save_pretrained(str(adapter_dir))
-    run.set_state(status="merging", phase="merge", adapter_dir=str(adapter_dir),
-                  message="training done — merging adapter")
+    if rank == 0:
+        trainer.save_model(str(adapter_dir))
+        tok.save_pretrained(str(adapter_dir))
+        run.set_state(status="merging", phase="merge", adapter_dir=str(adapter_dir),
+                      message="training done — merging adapter")
+    else:
+        log(f"rank {rank} finished training — exiting (merge runs on rank 0)")
+        sys.exit(0)
 
     del model, trainer
     gc.collect()
@@ -670,14 +725,17 @@ def main():
     a = ap.parse_args()
     cfg = json.load(open(a.config))
     cfg["_run_dir"] = str(Path(a.config).parent)
+    rank = int(os.environ.get("LOCAL_RANK", "0") or 0)
+    world = int(os.environ.get("WORLD_SIZE", "1") or 1)
     run = Run(cfg)
+    run.main_rank = (rank == 0) or world == 1
     try:
         if cfg.get("hf_token"):
             os.environ.setdefault("HF_TOKEN", cfg["hf_token"])
         if FAKE:
             fake_run(cfg, run)
         else:
-            train_real(cfg, run)
+            train_real(cfg, run, rank, world)
             to_gguf(cfg, run)
             ollama_import(cfg, run)
             hf_upload(cfg, run)
