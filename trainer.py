@@ -654,6 +654,144 @@ def _do_manual_upload(cfg, run):
     upload_checkpoint(cfg, run, ck)
 
 
+# ---------------------------------------------------------------- from scratch
+SCRATCH_SIZES = {
+    "tiny":   {"hidden_size": 512,  "num_hidden_layers": 8,  "num_attention_heads": 8,  "intermediate_size": 1376},
+    "small":  {"hidden_size": 768,  "num_hidden_layers": 12, "num_attention_heads": 12, "intermediate_size": 2048},
+    "medium": {"hidden_size": 1024, "num_hidden_layers": 16, "num_attention_heads": 16, "intermediate_size": 2816},
+}
+
+
+def train_scratch(cfg, run, rank=0, world=1):
+    """Train a small LLM from random weights (no base model). Full-precision params + AMP."""
+    import gc
+    import torch
+    from transformers import (AutoTokenizer, LlamaConfig, LlamaForCausalLM,
+                              Trainer, TrainerCallback, TrainingArguments,
+                              DataCollatorForLanguageModeling)
+    run.set_state(status="training", phase="train", message="building model from random weights…")
+    tok = AutoTokenizer.from_pretrained(cfg.get("base_model") or "Qwen/Qwen2.5-0.5B-Instruct")
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+
+    sources = collect_sources(cfg, rank)
+    all_samples = []
+    failed = []
+    max_s = int(cfg.get("max_samples") or 0)
+    for sname, spath in sources:
+        try:
+            s_list = parse_dataset(Path(spath), tok, cfg["max_seq"])
+            if max_s:
+                s_list = s_list[:max_s]
+            all_samples.extend((sname, s) for s in s_list)
+            log(f"source ok: {sname} — {len(s_list)} samples")
+        except Exception as e:
+            failed.append((sname, str(e)[:120]))
+            log(f"source FAILED, excluded: {sname} — {e}")
+    if not all_samples:
+        raise RuntimeError("all dataset sources failed to parse")
+    ok_srcs = sorted({n for n, _ in all_samples})
+
+    size = SCRATCH_SIZES.get(cfg.get("scratch_size") or "small", SCRATCH_SIZES["small"])
+    config = LlamaConfig(vocab_size=len(tok), max_position_embeddings=2048,
+                         rms_norm_eps=1e-5, **size)
+    n_params = sum(p.numel() for p in LlamaForCausalLM(config).parameters())
+    log(f"scratch model: {cfg.get('scratch_size')} — {n_params/1e6:.0f}M params")
+
+    blocks = []
+    src_of_block = []
+    ids = []
+    cur_src = None
+    eos = tok.eos_token_id or 0
+    for sname, s in all_samples:
+        if cur_src is not None and sname != cur_src and len(ids) >= cfg["max_seq"]:
+            blocks.append(ids[:cfg["max_seq"]]); src_of_block.append(cur_src)
+            ids = []
+        cur_src = sname
+        ids.extend(tok(s, add_special_tokens=True, truncation=True,
+                       max_length=cfg["max_seq"])["input_ids"])
+        ids.append(eos)
+        while len(ids) >= cfg["max_seq"]:
+            blocks.append(ids[:cfg["max_seq"]]); src_of_block.append(cur_src)
+            ids = ids[cfg["max_seq"]:]
+    if len(ids) >= cfg["max_seq"] // 2:
+        blocks.append(ids[:cfg["max_seq"]]); src_of_block.append(cur_src)
+    if not blocks:
+        raise RuntimeError("dataset too small for one block")
+    counts = {}
+    for b in src_of_block:
+        counts[b] = counts.get(b, 0) + 1
+    eff = max(1, cfg["batch_size"] * cfg["grad_accum"] * world)
+    total_steps = max(1, (len(blocks) * cfg["epochs"]) // eff)
+    steps_per_src, acc = [], 0
+    for s in ok_srcs:
+        acc += max(1, round(counts.get(s, 0) * cfg["epochs"] / eff))
+        steps_per_src.append((s, acc))
+    def src_for_step(step):
+        for s, upto in steps_per_src:
+            if step <= upto:
+                return s
+        return ok_srcs[-1]
+    run.set_state(total_steps=total_steps, current_dataset=ok_srcs[0],
+                  datasets_overview=[{"name": s, "blocks": counts.get(s, 0)} for s in ok_srcs],
+                  datasets_failed=[{"name": n, "error": e} for n, e in failed])
+
+    if world > 1:
+        from accelerate import PartialState
+        dev = PartialState().device
+        model = LlamaForCausalLM(config).to(dev)
+    else:
+        model = LlamaForCausalLM(config).to("cuda" if torch.cuda.is_available() else "cpu")
+
+    class CB(TrainerCallback):
+        def on_log(self, args, state, control, logs=None, **kw):
+            if rank != 0:
+                return
+            if logs and "loss" in logs and not run.stopping:
+                step = state.global_step or 0
+                run.set_state(status="training", phase="train", step=step,
+                              loss=round(float(logs["loss"]), 4),
+                              lr=float(logs.get("learning_rate", 0) or 0),
+                              epoch=round(float(logs.get("epoch", 0) or 0), 3))
+                run.progress_point(step, round(float(logs["loss"]), 4),
+                                   float(logs.get("learning_rate", 0) or 0),
+                                   round(float(logs.get("epoch", 0) or 0), 3))
+                try:
+                    run.set_state(current_dataset=src_for_step(step))
+                except NameError:
+                    pass
+
+    targs = TrainingArguments(
+        output_dir=str(run.dir / "ckpt"),
+        per_device_train_batch_size=cfg["batch_size"],
+        gradient_accumulation_steps=cfg["grad_accum"],
+        num_train_epochs=cfg["epochs"],
+        learning_rate=cfg["lr"] if cfg["lr"] > 3e-4 else 5e-4,
+        logging_steps=5, save_steps=cfg["save_steps"],
+        save_total_limit=int(cfg.get("keep_ckpts") or 2),
+        fp16=True, optim="adamw_torch_fused",
+        lr_scheduler_type="cosine", warmup_ratio=0.03,
+        report_to=[], remove_unused_columns=False, dataloader_drop_last=True)
+
+    trainer = Trainer(model=model, args=targs, train_dataset=BlockDataset(blocks),
+                      data_collator=DataCollatorForLanguageModeling(tok, mlm=False),
+                      callbacks=[CB()])
+    trainer.train()
+
+    merged = run.dir / "merged"
+    if rank == 0:
+        model.save_pretrained(str(merged), safe_serialization=True)
+        tok.save_pretrained(str(merged))
+        run.set_state(status="merging", phase="merge", merged_dir=str(merged),
+                      adapter_dir=str(merged),
+                      message="from-scratch training done — model saved (no adapter needed)")
+    else:
+        log(f"rank {rank} finished — exiting")
+        sys.exit(0)
+    del model, trainer
+    gc.collect()
+
+
 # ---------------------------------------------------------------- fake pipeline
 def fake_run(cfg, run):
     log("FAKE MODE — simulating the pipeline")
@@ -734,6 +872,8 @@ def main():
             os.environ.setdefault("HF_TOKEN", cfg["hf_token"])
         if FAKE:
             fake_run(cfg, run)
+        elif cfg.get("mode") == "scratch":
+            train_scratch(cfg, run, rank, world)
         else:
             train_real(cfg, run, rank, world)
             to_gguf(cfg, run)

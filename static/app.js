@@ -15,7 +15,11 @@ const I18N = {
     f_base: "Base model (HuggingFace id or local path)", f_runname: "Run / model name",
     f_epochs: "Epochs", f_lr: "Learning rate", f_batch: "Batch size", f_accum: "Grad accum",
     f_seq: "Max seq len", f_lora: "LoRA rank", f_savesteps: "Save every N steps",
-    f_resume: "Continue from (adapter of a previous run)", f_resume_none: "— fresh training —",
+    f_resume: "Продолжить с (адаптер прошлого рана)", f_resume_none: "— с нуля —",
+    f_scratch: "Обучение с нуля (без базовой модели)",
+    f_scratch_warn: "Честная математика: с нуля на паре ГБ данных получится игрушечная модель (простые связные тексты, уровень TinyStories) — для полезного ассистента оставь базовую модель. Поле базовой модели используется только как токенизатор.",
+    f_scratch: "Train from scratch (no base model)",
+    f_scratch_warn: "Honest math: from-scratch on a couple GB of data gives a toy-level model (simple coherent text, TinyStories-style) — for a useful assistant keep the base model. Base model field is used only as the tokenizer.",
     f_ollama: "Import to Ollama", f_hf: "Upload to HuggingFace",
     btn_start: "Start training", btn_stop: "Stop",
     prog_title: "Progress", eta: "eta",
@@ -132,6 +136,8 @@ const I18N = {
     f_epochs: "轮数", f_lr: "学习率", f_batch: "批次大小", f_accum: "梯度累积",
     f_seq: "最大序列长度", f_lora: "LoRA 秩", f_savesteps: "每 N 步保存",
     f_resume: "从上次运行继续（适配器）", f_resume_none: "— 全新训练 —",
+    f_scratch: "从零开始训练（无基础模型）",
+    f_scratch_warn: "坦白说：几 GB 数据从零训练只能得到玩具级模型（简单连贯文本，TinyStories 水平）— 要有用的助手请保留基础模型。基础模型字段仅用作分词器。",
     f_ollama: "导入 Ollama", f_hf: "上传到 HuggingFace",
     btn_start: "开始训练", btn_stop: "停止",
     prog_title: "进度", eta: "剩余",
@@ -489,6 +495,12 @@ $("#ds-file").addEventListener("change", async () => {
 });
 
 /* ---------------- training: start / stop / status ---------------- */
+$("#cfg-scratch").addEventListener("change", () => {
+  const on = $("#cfg-scratch").checked;
+  $("#cfg-scratch-size").classList.toggle("hidden", !on);
+  $("#scratch-warn").classList.toggle("hidden", !on);
+  modelInput.disabled = on;
+});
 $("#btn-train-start").addEventListener("click", async () => {
   const name = $("#cfg-name").value.trim();
   if (!name) { toast(t("toast_no_name")); return; }

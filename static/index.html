@@ -154,6 +154,15 @@
             <label data-i18n="f_resume">Continue from (adapter of a previous run)</label>
             <select id="cfg-resume"><option value="" data-i18n="f_resume_none">— fresh training —</option></select>
           </div>
+          <div class="row wrap" style="margin-bottom:6px">
+            <label class="row" style="gap:6px;font-size:12.5px"><input type="checkbox" id="cfg-scratch" style="width:auto"> <span data-i18n="f_scratch">Train from scratch (no base model)</span></label>
+            <select id="cfg-scratch-size" class="hidden" style="max-width:220px">
+              <option value="tiny">tiny — 45M params</option>
+              <option value="small" selected>small — 110M params</option>
+              <option value="medium">medium — 250M params</option>
+            </select>
+          </div>
+          <p class="small muted hidden" id="scratch-warn" data-i18n="f_scratch_warn"></p>
           <div class="row wrap" style="margin-top:4px">
             <label class="row" style="gap:6px;font-size:12.5px"><input type="checkbox" id="cfg-ollama" checked style="width:auto"> <span data-i18n="f_ollama">Import to Ollama</span></label>
             <input id="cfg-ollama-name" type="text" placeholder="ollama model name" spellcheck="false" style="max-width:180px">

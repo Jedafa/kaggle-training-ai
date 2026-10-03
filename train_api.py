@@ -126,6 +126,8 @@ def launch_training(body):
         "dataset_type": dstype,
         "dataset_value": value,
         "hf_datasets": ([x.strip() for x in re.split(r"[,;\n]+", value)] if dstype == "hf" else []),
+        "mode": "scratch" if body.get("mode") == "scratch" else "finetune",
+        "scratch_size": body.get("scratch_size") if body.get("scratch_size") in ("tiny", "small", "medium") else "small",
         "epochs": float(body.get("epochs") or 3),
         "lr": float(body.get("lr") or 2e-4),
         "batch_size": int(body.get("batch_size") or 2),
