@@ -720,9 +720,16 @@ function fillResumeSelect(runs) {
   const sel = $("#cfg-resume");
   const cur = sel.value;
   const repo = $("#cfg-hf-repo").value.trim();
-  sel.innerHTML = `<option value="">${t("f_resume_none")}</option>` +
-    (repo ? `<option value="hf:${repo}">HF: ${repo} (${t("ckpt_resume_hf")})</option>` : "") +
-    runs.map((r) => `<option value="runs/${r.name}/adapter">${r.name}</option>`).join("");
+  let opts = `<option value="">${t("f_resume_none")}</option>`;
+  for (const r of runs) {
+    if (r.last_ckpt_step && r.last_ckpt_local) {
+      opts += `<option value="${r.last_ckpt_local}">${r.name} — ${t("ckpt_resume_step")} ${r.last_ckpt_step}</option>`;
+    } else if (r.adapter_dir) {
+      opts += `<option value="runs/${r.name}/adapter">${r.name} (${t("adapter")})</option>`;
+    }
+  }
+  if (repo) opts += `<option value="hf:${repo}">HF: ${repo} (${t("ckpt_resume_hf")})</option>`;
+  sel.innerHTML = opts;
   if (cur) sel.value = cur;
 }
 
