@@ -26,6 +26,7 @@ import aiohttp
 import psutil
 
 import train_api
+import ai_gen
 
 HOME = Path.home()
 BASE = HOME / ".kaggle-panel"
@@ -629,6 +630,7 @@ def make_app():
     app.router.add_route("*", "/ollama/{path:.*}", ollama_proxy)
     app.router.add_route("*", "/ollama", ollama_proxy)
     train_api.register_train_routes(app)
+    ai_gen.register_ai_routes(app)
     return app
 
 

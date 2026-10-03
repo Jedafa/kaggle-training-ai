@@ -44,6 +44,8 @@ class Run:
             "base_model": cfg.get("base_model"), "adapter_dir": None,
             "merged_dir": None, "gguf_path": None,
             "ollama_model": None, "ollama_ready": False, "hf_url": None,
+            "last_ckpt_local": None, "last_ckpt_step": 0, "last_ckpt_uploaded": None,
+            "hf_uploading": False, "hf_ckpt_error": None, "command": None,
         }
         self.set_state()
         (self.dir / "train.pid").write_text(str(os.getpid()))
@@ -204,6 +206,11 @@ def train_real(cfg, run):
     model = prepare_model_for_kbit_training(model)
 
     resume = cfg.get("resume_from")
+    resume_ckpt = None
+    if resume and resume.startswith("hf:"):
+        cfg["hf_repo"] = resume[3:] if len(resume) > 3 else cfg.get("hf_repo")
+        resume_ckpt = hf_fetch_checkpoint(cfg, run)
+        resume = str(resume_ckpt)
     if resume and Path(resume).exists():
         model = PeftModel.from_pretrained(model, resume, is_trainable=True)
         log(f"resumed adapter: {resume}")
@@ -215,7 +222,13 @@ def train_real(cfg, run):
         model = get_peft_model(model, lconf)
     model.print_trainable_parameters()
 
+    ckpt_upload_on = bool(cfg.get("hf_token") or os.environ.get("HF_TOKEN")) and \
+        (cfg.get("hf_upload") or cfg.get("ckpt_upload"))
+
     class CB(TrainerCallback):
+        def __init__(self):
+            self.last_time_save = time.time()
+
         def on_log(self, args, state, control, logs=None, **kw):
             if logs and "loss" in logs and not run.stopping:
                 step = state.global_step or 0
@@ -227,13 +240,43 @@ def train_real(cfg, run):
                                    float(logs.get("learning_rate", 0) or 0),
                                    round(float(logs.get("epoch", 0) or 0), 3))
 
+        def on_step_end(self, args, state, control, **kw):
+            st = run.state
+            cmd = st.get("command")
+            if cmd:
+                run.set_state(command=None)
+                if cmd == "save":
+                    control.should_save = True
+                elif cmd == "upload":
+                    import threading
+                    threading.Thread(target=_do_manual_upload, args=(cfg, run),
+                                     daemon=True).start()
+            minutes = cfg.get("save_minutes") or 0
+            if minutes and time.time() - self.last_time_save >= minutes * 60:
+                control.should_save = True
+
+        def on_save(self, args, state, control, **kw):
+            self.last_time_save = time.time()
+            ckdir = Path(args.output_dir) / f"checkpoint-{state.global_step}"
+            try:
+                shutil.copy(Path(cfg["_run_dir"]) / "train_config.json", ckdir / "train_config.json")
+            except Exception:
+                pass
+            run.set_state(last_ckpt_local=str(ckdir), last_ckpt_step=state.global_step)
+            log(f"checkpoint saved: {ckdir.name}")
+            if ckpt_upload_on:
+                import threading
+                threading.Thread(target=upload_checkpoint, args=(cfg, run, ckdir),
+                                 daemon=True).start()
+
     targs = TrainingArguments(
         output_dir=str(run.dir / "ckpt"),
         per_device_train_batch_size=cfg["batch_size"],
         gradient_accumulation_steps=cfg["grad_accum"],
         num_train_epochs=cfg["epochs"],
         learning_rate=cfg["lr"],
-        logging_steps=5, save_steps=cfg["save_steps"], save_total_limit=2,
+        logging_steps=5, save_steps=cfg["save_steps"],
+        save_total_limit=int(cfg.get("keep_ckpts") or 2),
         fp16=True, optim="paged_adamw_8bit", gradient_checkpointing=True,
         lr_scheduler_type="cosine", warmup_ratio=0.03,
         report_to=[], remove_unused_columns=False, dataloader_drop_last=True)
@@ -241,6 +284,16 @@ def train_real(cfg, run):
     trainer = Trainer(model=model, args=targs, train_dataset=BlockDataset(blocks),
                       data_collator=DataCollatorForLanguageModeling(tok, mlm=False),
                       callbacks=[CB()])
+    if resume_ckpt:
+        # restore optimizer/scheduler/RNG and step counter (weights come from the adapter above)
+        try:
+            trainer._load_optimizer_and_scheduler(resume_ckpt)
+            trainer._load_rng_state(resume_ckpt)
+            ts = json.loads((Path(resume_ckpt) / "trainer_state.json").read_text())
+            trainer.state.global_step = ts.get("global_step", 0)
+            log(f"resumed optimizer/scheduler state at step {trainer.state.global_step}")
+        except Exception as e:
+            log(f"optimizer state restore skipped: {e}")
     trainer.train()
 
     adapter_dir = run.dir / "adapter"
@@ -348,6 +401,93 @@ def hf_upload(cfg, run):
     log(f"uploaded → https://huggingface.co/{repo}")
 
 
+# ---------------------------------------------------------------- checkpoints
+def _hf_api(tok):
+    try:
+        from huggingface_hub import HfApi
+    except ImportError as e:
+        raise RuntimeError("huggingface_hub not installed — pip install huggingface_hub") from e
+    return HfApi(token=tok)
+
+
+def hf_repo_id(cfg, run):
+    tok = cfg.get("hf_token") or os.environ.get("HF_TOKEN", "")
+    repo = cfg.get("hf_repo")
+    if not repo and tok:
+        try:
+            repo = f"{_hf_api(tok).whoami()['name']}/{cfg['run_name']}"
+        except Exception as e:
+            log(f"whoami failed ({e}) — set hf_repo manually in settings")
+    return tok, repo
+
+
+def upload_checkpoint(cfg, run, ckpt_dir):
+    """Upload a trainer checkpoint dir to HF so training can resume anywhere.
+    Retries 3x; only marks uploaded after files are verified on the repo."""
+    tok, repo = hf_repo_id(cfg, run)
+    if not tok or not repo:
+        run.set_state(hf_ckpt_error="no HF token/repo — checkpoint kept local")
+        return False
+    ckpt_dir = Path(ckpt_dir)
+    if not (ckpt_dir / "optimizer.pt").exists():
+        run.set_state(hf_ckpt_error="checkpoint dir has no optimizer state")
+        return False
+    api = _hf_api(tok)
+    for attempt in range(1, 4):
+        try:
+            run.set_state(hf_uploading=True, hf_ckpt_error=None,
+                          message=f"uploading checkpoint to HF (try {attempt}/3)…")
+            api.upload_folder(folder_path=str(ckpt_dir), repo_id=repo,
+                              path_in_repo="checkpoint", private=True,
+                              commit_message=f"checkpoint step {run.state.get('last_ckpt_step')}")
+            files = api.list_repo_files(repo)
+            need = ("checkpoint/optimizer.pt", "checkpoint/scheduler.pt",
+                    "checkpoint/trainer_state.json")
+            if not all(n in files for n in need):
+                raise RuntimeError(f"verification failed: missing {[n for n in need if n not in files]}")
+            run.set_state(hf_uploading=False,
+                          last_ckpt_uploaded=run.state.get("last_ckpt_step"),
+                          message=f"checkpoint uploaded ✓ (step {run.state.get('last_ckpt_step')})")
+            log(f"checkpoint uploaded to HF: {repo} (step {run.state.get('last_ckpt_step')})")
+            return True
+        except Exception as e:
+            log(f"HF checkpoint upload attempt {attempt} failed: {e}")
+            run.set_state(hf_uploading=False,
+                          hf_ckpt_error=str(e)[:300],
+                          message=f"HF upload failed (try {attempt}/3)")
+            time.sleep(8 * attempt)
+    return False
+
+
+def hf_fetch_checkpoint(cfg, run):
+    """Download the latest checkpoint from HF. Returns local dir or raises."""
+    tok, repo = hf_repo_id(cfg, run)
+    if not repo:
+        raise RuntimeError("HF resume: no repo configured")
+    run.set_state(message=f"downloading checkpoint from HF: {repo}…")
+    from huggingface_hub import snapshot_download
+    local = snapshot_download(repo, token=tok or None,
+                              local_dir=str(run.dir / "hf_ckpt"),
+                              allow_patterns=["checkpoint/*"])
+    cands = sorted(Path(local).glob("checkpoint-*"),
+                   key=lambda p: int(p.name.split("-")[-1]) if p.name.split("-")[-1].isdigit() else 0)
+    if not cands:
+        cands = [Path(local) / "checkpoint"]
+    ckpt = cands[-1]
+    if not (ckpt / "trainer_state.json").exists():
+        raise RuntimeError("HF checkpoint incomplete (no trainer_state.json)")
+    log(f"checkpoint from HF: {ckpt} (step {json.loads((ckpt / 'trainer_state.json').read_text())['global_step']})")
+    return ckpt
+
+
+def _do_manual_upload(cfg, run):
+    ck = run.state.get("last_ckpt_local")
+    if not ck or not Path(ck).exists():
+        run.set_state(hf_ckpt_error="no local checkpoint yet")
+        return
+    upload_checkpoint(cfg, run, ck)
+
+
 # ---------------------------------------------------------------- fake pipeline
 def fake_run(cfg, run):
     log("FAKE MODE — simulating the pipeline")
@@ -358,7 +498,33 @@ def fake_run(cfg, run):
     for step in range(1, 121):
         if run.stopping:
             return
+        cmd = run.state.get("command")
+        if cmd:
+            run.set_state(command=None)
+            if cmd == "save":
+                ck = run.dir / f"checkpoint-{step}"
+                ck.mkdir(parents=True, exist_ok=True)
+                (ck / "optimizer.pt").write_bytes(b"fake")
+                (ck / "trainer_state.json").write_text(json.dumps({"global_step": step}))
+                shutil.copy(Path(cfg["_run_dir"]) / "train_config.json", ck / "train_config.json")
+                run.set_state(last_ckpt_local=str(ck), last_ckpt_step=step)
+                log(f"checkpoint saved: {ck.name}")
+                if cfg.get("hf_token"):
+                    upload_checkpoint(cfg, run, ck)
+            elif cmd == "upload":
+                if cfg.get("hf_token"):
+                    import threading
+                    threading.Thread(target=_do_manual_upload, args=(cfg, run), daemon=True).start()
         loss = max(0.15, 2.6 * (2.718 ** (-step / 40)) + 0.1 + random.uniform(0, 0.06))
+        if step in (40, 80):
+            ck = run.dir / f"checkpoint-{step}"
+            ck.mkdir(parents=True, exist_ok=True)
+            (ck / "optimizer.pt").write_bytes(b"fake")
+            (ck / "trainer_state.json").write_text(json.dumps({"global_step": step}))
+            run.set_state(last_ckpt_local=str(ck), last_ckpt_step=step)
+            log(f"checkpoint saved: {ck.name}")
+            if cfg.get("hf_token"):
+                upload_checkpoint(cfg, run, ck)
         if step % 5 == 0:
             run.set_state(status="training", phase="train", step=step,
                           loss=round(loss, 4), lr=cfg["lr"] * (1 - step / 160),

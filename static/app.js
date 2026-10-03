@@ -41,8 +41,19 @@ const I18N = {
     st_ollama: "ollama", st_hf: "hf upload", st_done: "done", st_error: "error", st_stopped: "stopped",
     st_stopping: "stopping", st_unknown: "—", gpu: "GPU", no_gpu: "not detected",
     delete_run: "Delete", confirm_delete: "Delete this run?", continue_run: "Continue",
+    ckpt_saved: "ckpt saved", ckpt_up: "on HF", ckpt_save_btn: "Save checkpoint",
+    ckpt_up_btn: "Upload checkpoint", ckpt_saving: "saving checkpoint…",
+    ckpt_uploading: "uploading checkpoint…", ckpt_resume_hf: "resume from last checkpoint",
     download_btn: "Download", open_chat: "Chat", hf_set: "HF token ✓", hf_unset: "HF token not set",
     steps: "steps", adapter: "adapter", gguf_m: "gguf",
+    ai_title: "AI dataset generator", ai_sub: "any OpenAI-compatible API writes the dataset for you — then auto-trains",
+    ai_url: "API URL (chat/completions)", ai_key: "API key", ai_model: "Generator model",
+    ai_prompt: "What dataset to make (topic, style, language, rules)",
+    ai_count: "Samples", ai_temp: "Temperature",
+    ai_refs: "Web references (urls, comma-separated — optional)",
+    ai_autotrain: "Auto-start training when done", ai_keynote: "key stays in memory only",
+    ai_generate: "Generate dataset", ai_test: "Test API", ai_use: "Use this dataset ↓",
+    ai_need_prompt: "Describe the dataset first",
   },
   ru: {
     subtitle: "обучи · запусти · выпусти свою модель", password: "Пароль", login: "Войти",
@@ -83,8 +94,19 @@ const I18N = {
     st_ollama: "ollama", st_hf: "загрузка на hf", st_done: "готово", st_error: "ошибка", st_stopped: "остановлено",
     st_stopping: "останавливаю", st_unknown: "—", gpu: "GPU", no_gpu: "не обнаружен",
     delete_run: "Удалить", confirm_delete: "Удалить этот ран?", continue_run: "Дообучить",
+    ckpt_saved: "чекпоинт", ckpt_up: "на HF", ckpt_save_btn: "Сохранить чекпоинт",
+    ckpt_up_btn: "Залить чекпоинт", ckpt_saving: "сохраняю чекпоинт…",
+    ckpt_uploading: "заливаю чекпоинт…", ckpt_resume_hf: "продолжить с чекпоинта",
     download_btn: "Скачать", open_chat: "Чат", hf_set: "HF токен ✓", hf_unset: "HF токен не задан",
     steps: "шагов", adapter: "адаптер", gguf_m: "gguf",
+    ai_title: "ИИ-генератор датасета", ai_sub: "любой OpenAI-совместимый API пишет датасет за тебя — потом авто-обучение",
+    ai_url: "API URL (chat/completions)", ai_key: "API ключ", ai_model: "Модель-генератор",
+    ai_prompt: "Какой датасет сделать (тема, стиль, язык, правила)",
+    ai_count: "Сэмплов", ai_temp: "Temperature",
+    ai_refs: "Референсы из интернета (url через запятую — опционально)",
+    ai_autotrain: "Автостарт обучения после генерации", ai_keynote: "ключ хранится только в памяти",
+    ai_generate: "Сгенерировать датасет", ai_test: "Проверить API", ai_use: "Использовать этот датасет ↓",
+    ai_need_prompt: "Сначала опиши датасет",
   },
   zh: {
     subtitle: "训练 · 部署 · 发布你自己的模型", password: "密码", login: "登录",
@@ -125,8 +147,19 @@ const I18N = {
     st_ollama: "ollama", st_hf: "上传 hf", st_done: "完成", st_error: "错误", st_stopped: "已停止",
     st_stopping: "停止中", st_unknown: "—", gpu: "GPU", no_gpu: "未检测到",
     delete_run: "删除", confirm_delete: "删除此次运行？", continue_run: "继续训练",
+    ckpt_saved: "检查点", ckpt_up: "HF 上", ckpt_save_btn: "保存检查点",
+    ckpt_up_btn: "上传检查点", ckpt_saving: "正在保存检查点…",
+    ckpt_uploading: "正在上传检查点…", ckpt_resume_hf: "从检查点继续",
     download_btn: "下载", open_chat: "对话", hf_set: "HF 令牌 ✓", hf_unset: "未设置 HF 令牌",
     steps: "步数", adapter: "适配器", gguf_m: "gguf",
+    ai_title: "AI 数据集生成器", ai_sub: "任何 OpenAI 兼容 API 替你写数据集 — 然后自动训练",
+    ai_url: "API 地址（chat/completions）", ai_key: "API 密钥", ai_model: "生成模型",
+    ai_prompt: "要做什么数据集（主题、风格、语言、规则）",
+    ai_count: "样本数", ai_temp: "温度",
+    ai_refs: "网络参考（网址，逗号分隔 — 可选）",
+    ai_autotrain: "完成后自动开始训练", ai_keynote: "密钥只存于内存",
+    ai_generate: "生成数据集", ai_test: "测试 API", ai_use: "使用此数据集 ↓",
+    ai_need_prompt: "先描述数据集",
   },
 };
 
@@ -441,6 +474,12 @@ $("#btn-train-start").addEventListener("click", async () => {
 $("#btn-train-stop").addEventListener("click", async () => {
   try { await apiPost("/api/train/stop", { run: state.runName }); toast(t("toast_stopping")); } catch {}
 });
+$("#btn-ck-save").addEventListener("click", async () => {
+  try { await apiPost("/api/train/command", { run: state.runName, cmd: "save" }); toast(t("ckpt_saving")); } catch {}
+});
+$("#btn-ck-upload").addEventListener("click", async () => {
+  try { await apiPost("/api/train/command", { run: state.runName, cmd: "upload" }); toast(t("ckpt_uploading")); } catch {}
+});
 
 const BADGE_CLS = { preparing: "b-iris", training: "b-lime", merging: "b-teal", gguf: "b-teal", ollama: "b-teal", hf_upload: "b-teal", done: "b-green", error: "b-coral", stopped: "", stopping: "b-iris" };
 function badgeFor(status) { return `badge ${BADGE_CLS[status] || ""}`; }
@@ -468,6 +507,12 @@ function renderTrain(d) {
       if (ds > 0) $("#p-eta").textContent = fmtEta((st.total_steps - st.step) * (dt / ds));
     }
   } else $("#p-eta").textContent = "—";
+  $("#p-ck").textContent = st.last_ckpt_step ? "step " + st.last_ckpt_step : "—";
+  $("#p-ckup").textContent = st.hf_uploading ? "…" : (st.last_ckpt_uploaded ? "step " + st.last_ckpt_uploaded : "—");
+  const cke = $("#p-ck-err");
+  if (st.hf_ckpt_error) { cke.classList.remove("hidden"); cke.textContent = "⚠ " + st.hf_ckpt_error; } else cke.classList.add("hidden");
+  $("#btn-ck-save").classList.toggle("hidden", !active);
+  $("#btn-ck-upload").classList.toggle("hidden", !active);
   drawLossChart($("#loss-chart"), state.lastPoints);
   const logBox = $("#train-log");
   const stick = logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 40;
@@ -617,7 +662,9 @@ function renderOllama(models) {
 function fillResumeSelect(runs) {
   const sel = $("#cfg-resume");
   const cur = sel.value;
+  const repo = $("#cfg-hf-repo").value.trim();
   sel.innerHTML = `<option value="">${t("f_resume_none")}</option>` +
+    (repo ? `<option value="hf:${repo}">HF: ${repo} (${t("ckpt_resume_hf")})</option>` : "") +
     runs.map((r) => `<option value="runs/${r.name}/adapter">${r.name}</option>`).join("");
   if (cur) sel.value = cur;
 }
@@ -676,6 +723,88 @@ async function sendChat() {
 }
 function timeNow() { return performance.now() / 1000; }
 
+/* ---------------- AI dataset generator ---------------- */
+$("#ai-test").addEventListener("click", async () => {
+  try {
+    const d = await apiPost("/api/ai/test", { api_url: $("#ai-url").value.trim(), api_key: $("#ai-key").value.trim(), model: $("#ai-model").value.trim() });
+    toast(d.ok ? "✓ " + (d.reply || "ok") : "⚠ " + (d.error || "fail"));
+  } catch { toast("⚠ " + t("toast_fail")); }
+});
+$("#ai-start").addEventListener("click", async () => {
+  const prompt = $("#ai-prompt").value.trim();
+  if (!prompt) { toast(t("ai_need_prompt")); return; }
+  try {
+    const d = await apiPost("/api/ai/start", {
+      prompt,
+      api_url: $("#ai-url").value.trim(),
+      api_key: $("#ai-key").value.trim(),
+      model: $("#ai-model").value.trim(),
+      count: +$("#ai-count").value || 50,
+      temperature: +$("#ai-temp").value || 0.9,
+      ref_urls: $("#ai-refs").value.trim(),
+      auto_train: $("#ai-autotrain").checked,
+      dataset_name: ($("#cfg-name").value.trim() || "ai") + "-ds",
+      train: {
+        base_model: modelInput.value.trim(),
+        epochs: +$("#cfg-epochs").value || 3,
+        lr: parseFloat($("#cfg-lr").value) || 2e-4,
+        batch_size: +$("#cfg-batch").value || 2,
+        grad_accum: +$("#cfg-accum").value || 4,
+        max_seq: +$("#cfg-seq").value || 1024,
+        lora_r: +$("#cfg-lora").value || 16,
+        save_steps: +$("#cfg-save").value || 100,
+        save_minutes: +$("#cfg-savemin").value || 0,
+        keep_ckpts: +$("#cfg-keepck").value || 2,
+        ckpt_upload: true,
+        ollama_import: $("#cfg-ollama").checked,
+        ollama_name: $("#cfg-ollama-name").value.trim() || $("#cfg-name").value.trim(),
+        hf_upload: $("#cfg-hf").checked,
+        hf_repo: $("#cfg-hf-repo").value.trim() || null,
+      },
+    });
+    if (d.error) { toast("⚠ " + d.error); return; }
+    toast(t("toast_starting"));
+  } catch { toast("⚠ " + t("toast_fail")); }
+});
+$("#ai-stop").addEventListener("click", async () => {
+  try { await apiPost("/api/ai/stop", {}); toast(t("toast_stopping")); } catch {}
+});
+$("#ai-use-ds").addEventListener("click", () => {
+  const st = window.__aiState || {};
+  if (!st.dataset_file) return;
+  state.dsMode = "file";
+  state.uploadedName = st.dataset_file.split("/").pop();
+  setDsMode("file");
+  $("#ds-file-name").textContent = state.uploadedName + " · AI ✓";
+  toast("↓ " + state.uploadedName);
+});
+function renderAi(d) {
+  const st = d || {};
+  const active = st.status === "running";
+  $("#ai-badge").textContent = st.status === "idle" ? "—" : t("st_" + (BADGE_CLS[st.status] ? st.status : "unknown")) || st.status;
+  $("#ai-badge").className = "badge " + (BADGE_CLS[st.status] || "");
+  $("#ai-start").classList.toggle("hidden", active);
+  $("#ai-stop").classList.toggle("hidden", !active);
+  const pct = st.total ? Math.min(100, (st.generated || 0) / st.total * 100) : 0;
+  $("#ai-bar").style.width = pct + "%";
+  $("#ai-progress").textContent = st.status === "running" || st.generated
+    ? `${st.generated || 0} / ${st.total || 0} — ${st.message || ""}` : (st.message || "—");
+  window.__aiState = st;
+  const done = ["done", "stopped"].includes(st.status) && st.dataset_file;
+  $("#ai-use-ds").classList.toggle("hidden", !done);
+  const prev = $("#ai-preview");
+  if (st.last_samples && st.last_samples.length) {
+    prev.classList.remove("hidden");
+    prev.innerHTML = st.last_samples.map((s) =>
+      `<div style="margin-bottom:6px"><b style="color:var(--mist)">${String(s.instruction).slice(0, 80)}</b><br>${String(s.output).slice(0, 120)}…</div>`).join("");
+  } else prev.classList.add("hidden");
+  if (st.status === "done") {
+    state.dsMode = "file";
+    state.uploadedName = (st.dataset_file || "").split("/").pop();
+    if (st.auto_train && st.auto_train && st.auto_train.ok) state.runName = st.auto_train.run || state.runName;
+  }
+}
+
 /* ---------------- boot ---------------- */
 applyLang();
 applyTheme();
@@ -684,5 +813,7 @@ setInterval(() => apiGet("/api/stats").then(renderStats).catch(() => setConn(fal
 setInterval(pollTrain, 2500);
 setInterval(() => { if (state.view === "models") refreshModels(); }, 6000);
 setInterval(pollOutput, 1000);
+setInterval(() => apiGet("/api/ai/status").then(renderAi).catch(() => {}), 2000);
 apiGet("/api/stats").then(renderStats).catch(() => {});
 pollTrain();
+apiGet("/api/ai/status").then(renderAi).catch(() => {});

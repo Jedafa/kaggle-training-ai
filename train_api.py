@@ -86,29 +86,31 @@ def _proc_alive(name):
     return False
 
 
-async def api_train_start(request):
-    body = await request.json()
+def launch_training(body):
+    """Validate + spawn a training run. Returns (ok, response_dict)."""
     for n, p in list(_live.items()):
         if p.poll() is None:
-            return web.json_response({"error": "already_training", "run": n}, status=409)
+            return False, {"error": "already_training", "run": n, "status": 409}
 
     name = safe_name(body.get("run_name") or f"run-{secrets.token_hex(3)}")
     st = read_state(name)
     if st.get("status") in ACTIVE_STATUSES and _proc_alive(name):
-        return web.json_response({"error": "run_in_progress", "run": name}, status=409)
+        return False, {"error": "run_in_progress", "run": name, "status": 409}
 
     dstype = body.get("dataset_type")
     value = str(body.get("dataset_value") or "").strip()
     if dstype == "url":
         if not re.match(r"^https?://", value):
-            return web.json_response({"error": "bad_dataset_url"}, status=400)
+            return False, {"error": "bad_dataset_url", "status": 400}
     elif dstype == "file":
-        p = UPLOADS / safe_name(value, "dataset.bin")
+        p = Path(value)
         if not p.exists():
-            return web.json_response({"error": "dataset_not_found"}, status=400)
+            p = UPLOADS / safe_name(value, "dataset.bin")
+        if not p.exists():
+            return False, {"error": "dataset_not_found", "status": 400}
         value = str(p)
     else:
-        return web.json_response({"error": "dataset_type must be url|file"}, status=400)
+        return False, {"error": "dataset_type must be url|file", "status": 400}
 
     cfg = {
         "run_name": name,
@@ -122,6 +124,9 @@ async def api_train_start(request):
         "max_seq": int(body.get("max_seq") or 1024),
         "lora_r": int(body.get("lora_r") or 16),
         "save_steps": int(body.get("save_steps") or 100),
+        "save_minutes": float(body.get("save_minutes") or 0) or None,
+        "keep_ckpts": int(body.get("keep_ckpts") or 2),
+        "ckpt_upload": bool(body.get("ckpt_upload", True)),
         "resume_from": str(body.get("resume_from") or "").strip() or None,
         "gguf_outtype": body.get("gguf_outtype") if body.get("gguf_outtype") in ("q8_0", "f16") else "q8_0",
         "ollama_import": bool(body.get("ollama_import", True)),
@@ -149,7 +154,13 @@ async def api_train_start(request):
     _live[name] = proc
     write_state(name, {"status": "preparing", "phase": "prepare", "pid": proc.pid,
                        "error": None, "message": "trainer started (ollama stopped to free VRAM)"})
-    return web.json_response({"ok": True, "run": name, "note": "ollama stopped for training"})
+    return True, {"ok": True, "run": name, "note": "ollama stopped for training"}
+
+
+async def api_train_start(request):
+    body = await request.json()
+    ok, resp = launch_training(body)
+    return web.json_response(resp, status=200 if ok else resp.get("status", 400))
 
 
 async def api_train_stop(request):
@@ -268,6 +279,16 @@ def _zip_run(name):
     return out
 
 
+async def api_train_command(request):
+    body = await request.json()
+    name = safe_name(body.get("run"))
+    cmd = body.get("cmd")
+    if cmd not in ("save", "upload"):
+        return web.json_response({"error": "cmd must be save|upload"}, status=400)
+    write_state(name, {"command": cmd})
+    return web.json_response({"ok": True, "run": name, "command": cmd})
+
+
 async def api_train_download(request):
     name = safe_name(request.match_info["run"])
     if not run_dir(name).exists():
@@ -285,3 +306,4 @@ def register_train_routes(app):
     app.router.add_post("/api/train/upload", api_train_upload)
     app.router.add_get("/api/train/download/{run}", api_train_download)
     app.router.add_post("/api/train/delete", api_train_delete)
+    app.router.add_post("/api/train/command", api_train_command)
