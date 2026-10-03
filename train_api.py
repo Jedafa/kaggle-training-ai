@@ -467,11 +467,24 @@ async def api_ds_hf_check(request):
     return web.json_response({"ok": True, "results": results})
 
 
+def _safe(handler):
+    async def wrapped(request):
+        try:
+            return await handler(request)
+        except web.HTTPException:
+            raise
+        except Exception as e:
+            import traceback
+            return web.json_response(
+                {"error": str(e)[:250], "tb": traceback.format_exc()[-500:]}, status=500)
+    return wrapped
+
+
 def register_train_routes(app):
-    app.router.add_post("/api/train/start", api_train_start)
-    app.router.add_post("/api/train/stop", api_train_stop)
-    app.router.add_get("/api/train/status", api_train_status)
-    app.router.add_get("/api/train/list", api_train_list)
+    app.router.add_post("/api/train/start", _safe(api_train_start))
+    app.router.add_post("/api/train/stop", _safe(api_train_stop))
+    app.router.add_get("/api/train/status", _safe(api_train_status))
+    app.router.add_get("/api/train/list", _safe(api_train_list))
     app.router.add_post("/api/train/upload", api_train_upload)
     app.router.add_get("/api/train/download/{run}", api_train_download)
     app.router.add_post("/api/train/delete", api_train_delete)

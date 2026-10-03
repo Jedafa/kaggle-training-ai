@@ -621,6 +621,16 @@ async function pollTrain() {
   }
   try {
     const d = await apiGet(`/api/train/status?run=${encodeURIComponent(state.runName)}`);
+    if (d.error && !d.state) {
+      if (window.__lastApiErr !== d.error) {
+        window.__lastApiErr = d.error;
+        toast("⚠ " + d.error);
+        const lb = $("#train-log");
+        if (lb) lb.textContent = "⚠ " + d.error + "\n" + (d.tb || "");
+      }
+      return;
+    }
+    window.__lastApiErr = null;
     state.lastPoints = d.points || [];
     renderTrain(d);
   } catch {}
@@ -917,9 +927,35 @@ function renderAi(d) {
   }
 }
 
+/* ---------------- form memory ---------------- */
+const FORM_IDS = ["cfg-base", "cfg-name", "cfg-epochs", "cfg-lr", "cfg-batch", "cfg-accum",
+  "cfg-seq", "cfg-lora", "cfg-save", "cfg-savemin", "cfg-keepck", "cfg-maxsamp",
+  "cfg-ollama-name", "cfg-hf-repo", "cfg-scratch-size",
+  "ds-url", "ds-hf-repos",
+  "ai-url", "ai-key", "ai-model", "ai-count", "ai-temp", "ai-maxtok", "ai-prompt", "ai-refs"];
+const FORM_CBS = ["cfg-ollama", "cfg-hf", "cfg-scratch", "ai-autotrain", "ai-savehf"];
+function saveForm() {
+  const v = {};
+  FORM_IDS.forEach((id) => { const el = document.getElementById(id); if (el) v[id] = el.value; });
+  FORM_CBS.forEach((id) => { const el = document.getElementById(id); if (el) v["cb:" + id] = el.checked; });
+  localStorage.setItem("panel_form", JSON.stringify(v));
+}
+function restoreForm() {
+  let v;
+  try { v = JSON.parse(localStorage.getItem("panel_form") || "{}"); } catch { return; }
+  FORM_IDS.forEach((id) => { const el = document.getElementById(id); if (el && v[id] !== undefined && v[id] !== "") el.value = v[id]; });
+  FORM_CBS.forEach((id) => { const el = document.getElementById(id); if (el && v["cb:" + id] !== undefined) el.checked = v["cb:" + id]; });
+  if (v["cb:cfg-scratch"]) $("#cfg-scratch").dispatchEvent(new Event("change"));
+}
+let _formT = null;
+function formChanged() { clearTimeout(_formT); _formT = setTimeout(saveForm, 500); }
+document.addEventListener("input", formChanged);
+document.addEventListener("change", formChanged);
+
 /* ---------------- boot ---------------- */
 applyLang();
 applyTheme();
+restoreForm();
 tryVerify();
 setInterval(() => apiGet("/api/stats").then(renderStats).catch(() => setConn(false)), 2000);
 setInterval(pollTrain, 2500);
