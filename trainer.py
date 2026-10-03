@@ -195,6 +195,12 @@ def sample_sources(cfg, run, tok, rank, failed):
                             break
                         if per_file and n >= per_file:
                             break
+                    if n == 0:
+                        try:
+                            head = out_path.read_text(errors="ignore")[:300].replace("\n", " ")
+                            log(f"hf {repo}: shard {idx+1} yielded 0 samples — RAW CONTENT: {head}")
+                        except Exception:
+                            pass
                     log(f"hf {repo}: shard {idx+1}/{len(files)} -> {n} samples (total {got})")
                     run.set_state(message=f"{repo}: {got}/{max_s or 'unlimited'} samples")
             except Exception as e:
