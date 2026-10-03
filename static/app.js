@@ -53,7 +53,7 @@ const I18N = {
     ai_refs: "Web references (urls, comma-separated — optional)",
     ai_maxtok: "Max tokens / batch",
     ai_autotrain: "Auto-start training when done", ai_keynote: "key stays in memory only",
-    ai_generate: "Generate dataset", ai_test: "Test API", ai_use: "Use this dataset ↓",
+    ai_generate: "Generate dataset", ai_test: "Test API", ai_use: "Use this dataset ↓", ai_fetch: "⤓ models",
     ai_need_prompt: "Describe the dataset first",
     ai_savehf: "Save dataset to HuggingFace", ds_push: "↑ HF",
   },
@@ -108,7 +108,7 @@ const I18N = {
     ai_refs: "Референсы из интернета (url через запятую — опционально)",
     ai_maxtok: "Макс. токенов на батч",
     ai_autotrain: "Автостарт обучения после генерации", ai_keynote: "ключ хранится только в памяти",
-    ai_generate: "Сгенерировать датасет", ai_test: "Проверить API", ai_use: "Использовать этот датасет ↓",
+    ai_generate: "Сгенерировать датасет", ai_test: "Проверить API", ai_use: "Использовать этот датасет ↓", ai_fetch: "⤓ модели",
     ai_need_prompt: "Сначала опиши датасет",
     ai_savehf: "Сохранить датасет на HuggingFace", ds_push: "↑ HF",
   },
@@ -163,7 +163,7 @@ const I18N = {
     ai_refs: "网络参考（网址，逗号分隔 — 可选）",
     ai_maxtok: "每批最大令牌数",
     ai_autotrain: "完成后自动开始训练", ai_keynote: "密钥只存于内存",
-    ai_generate: "生成数据集", ai_test: "测试 API", ai_use: "使用此数据集 ↓",
+    ai_generate: "生成数据集", ai_test: "测试 API", ai_use: "使用此数据集 ↓", ai_fetch: "⤓ 模型",
     ai_need_prompt: "先描述数据集",
     ai_savehf: "保存数据集到 HuggingFace", ds_push: "↑ HF",
   },
@@ -736,10 +736,27 @@ async function sendChat() {
 function timeNow() { return performance.now() / 1000; }
 
 /* ---------------- AI dataset generator ---------------- */
+$("#ai-fetch").addEventListener("click", async () => {
+  const btn = $("#ai-fetch"); btn.disabled = true;
+  try {
+    const d = await apiPost("/api/ai/models", { api_url: $("#ai-url").value.trim(), api_key: $("#ai-key").value.trim() });
+    if (!d.ok) { toast("⚠ " + (d.error || "fail")); return; }
+    const dl = $("#ai-model-list");
+    dl.innerHTML = (d.models || []).map((m) => `<option value="${m}">`).join("");
+    toast((d.models || []).length + " models fetched");
+  } catch { toast("⚠ " + t("toast_fail")); }
+  btn.disabled = false;
+});
 $("#ai-test").addEventListener("click", async () => {
   try {
     const d = await apiPost("/api/ai/test", { api_url: $("#ai-url").value.trim(), api_key: $("#ai-key").value.trim(), model: $("#ai-model").value.trim() });
-    toast(d.ok ? "✓ " + (d.reply || "ok") : "⚠ " + (d.error || "fail"));
+    if (d.ok) {
+      toast("✓ " + (d.reply || "ok"));
+      if (d.resolved) console.info("resolved:", d.resolved);
+      if (d.models && d.models.length) {
+        $("#ai-model-list").innerHTML = d.models.map((m) => `<option value="${m}">`).join("");
+      }
+    } else toast("⚠ " + (d.error || "fail"));
   } catch { toast("⚠ " + t("toast_fail")); }
 });
 $("#ai-start").addEventListener("click", async () => {

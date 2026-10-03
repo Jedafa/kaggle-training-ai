@@ -62,7 +62,13 @@
           <div class="form-grid">
             <div class="field" style="grid-column:span 2"><label data-i18n="ai_url">API URL (chat/completions)</label><input id="ai-url" type="text" placeholder="https://api.openai.com/v1/chat/completions" spellcheck="false"></div>
             <div class="field"><label data-i18n="ai_key">API key</label><input id="ai-key" type="password" placeholder="sk-..." spellcheck="false"></div>
-            <div class="field"><label data-i18n="ai_model">Generator model</label><input id="ai-model" type="text" placeholder="gpt-4o-mini" spellcheck="false"></div>
+            <div class="field"><label data-i18n="ai_model">Generator model</label>
+              <div class="row">
+                <input id="ai-model" class="grow" type="text" list="ai-model-list" placeholder="gpt-4o-mini / deepseek-chat" spellcheck="false">
+                <button class="btn btn-ghost" id="ai-fetch" style="padding:8px 10px" title="Fetch models"><span data-i18n="ai_fetch">⤓ models</span></button>
+              </div>
+              <datalist id="ai-model-list"></datalist>
+            </div>
           </div>
           <div class="field"><label data-i18n="ai_prompt">What dataset to make (topic, style, language, rules)</label><textarea id="ai-prompt" rows="2" placeholder="e.g. 200 russian Q&A about minecraft redstone, answers 2-4 sentences"></textarea></div>
           <div class="form-grid">

@@ -106,6 +106,76 @@ def normalize_url(u):
     return u
 
 
+
+def normalize_url(u):
+    if u.endswith("/chat/completions") or u.endswith("/api/chat"):
+        return u
+    if re.search(r"/v1/?$", u):
+        return u.rstrip("/") + "/chat/completions"
+    return u
+
+
+async def resolve_chat_url(sess, url, headers):
+    """Accepts any provider base URL and returns the chat-completions endpoint.
+    Probes /v1/models and /models so DeepSeek/OpenAI/OpenRouter/Groq/local-ollama
+    all work no matter which form of the base URL the user pasted."""
+    url = url.strip().rstrip("/")
+    if url.endswith("/chat/completions") or url.endswith("/api/chat"):
+        return url
+    if re.search(r"/v1/?$", url):
+        return url + "/chat/completions"
+    probes = [(url + "/v1/models", url + "/v1/chat/completions"),
+              (url + "/models", url + "/chat/completions")]
+    if ":11434" in url:
+        probes.insert(0, (url + "/api/tags", url + "/api/chat"))
+    for probe, chat in probes:
+        try:
+            async with sess.get(probe, headers=headers) as r:
+                if r.status == 200:
+                    d = await r.json(content_type=None)
+                    if isinstance(d, dict) and ("data" in d or "models" in d):
+                        log(f"resolved chat url via {probe}: {chat}")
+                        return chat
+        except Exception:
+            continue
+    return url + "/v1/chat/completions"
+
+
+async def fetch_model_ids(sess, url, headers):
+    url = url.strip().rstrip("/")
+    if url.endswith("/chat/completions"):
+        url = url.rsplit("/chat/completions", 1)[0]
+    elif url.endswith("/api/chat"):
+        url = url.rsplit("/api/chat", 1)[0]
+    cands = []
+    if ":11434" in url:
+        cands.append(url + "/api/tags")
+    if re.search(r"/v1/?$", url):
+        cands.append(url + "/models")
+    else:
+        cands += [url + "/v1/models", url + "/models"]
+    for cand in cands:
+        try:
+            async with sess.get(cand, headers=headers) as r:
+                if r.status != 200:
+                    continue
+                d = await r.json(content_type=None)
+                items = d.get("data") if isinstance(d, dict) else None
+                items = items or (d.get("models") if isinstance(d, dict) else None) or []
+                ids = []
+                for m in items:
+                    if isinstance(m, dict):
+                        ids.append(m.get("id") or m.get("name"))
+                    elif isinstance(m, str):
+                        ids.append(m)
+                ids = [x for x in ids if x]
+                if ids:
+                    return sorted(set(ids))
+        except Exception:
+            continue
+    return []
+
+
 def extract_content(data):
     """Pull the text out of an OpenAI-compatible or ollama-native response.
     Surfaces provider errors (OpenRouter returns 200 + error object sometimes)
@@ -174,6 +244,14 @@ async def generate_job(cfg):
         except Exception as e:
             refs += f"\n({u}: fetch failed: {e})\n"
 
+    headers0 = {"Content-Type": "application/json"}
+    if cfg.get("api_key"):
+        headers0["Authorization"] = "Bearer " + cfg["api_key"]
+    async with ClientSession(timeout=ClientTimeout(total=30)) as s0:
+        chat_url = await resolve_chat_url(s0, cfg["api_url"], headers0)
+    write_state(resolved_url=chat_url, message="API resolved: " + chat_url)
+    log("chat url: " + chat_url)
+
     system = build_system_prompt(cfg, refs)
     seen = set()
     lines = []
@@ -187,6 +265,8 @@ async def generate_job(cfg):
 
     try:
         async with ClientSession(timeout=ClientTimeout(total=240)) as sess:
+            headers = headers0
+            api_endpoint = chat_url
             while written < cfg["count"] and not _job["stop"]:
                 need = min(cfg["batch"], cfg["count"] - written)
                 user = (f"Generate exactly {need} new samples. Total already generated: {written}.")
@@ -204,7 +284,7 @@ async def generate_job(cfg):
                     payload["reasoning"] = {"enabled": False}
                 try:
                     async with sess.post(
-                        cfg["api_url"], json=payload,
+                        api_endpoint, json=payload,
                         headers=headers) as r:
                         if r.status != 200:
                             body = (await r.text())[:200]
@@ -369,13 +449,15 @@ async def api_ai_status(request):
 
 async def api_ai_test(request):
     body = await request.json()
-    api_url = normalize_url(str(body.get("api_url") or DEFAULT_URL).strip())
+    api_url = str(body.get("api_url") or DEFAULT_URL).strip()
     headers = {"Content-Type": "application/json"}
     if body.get("api_key"):
         headers["Authorization"] = "Bearer " + str(body["api_key"]).strip()
     try:
-        async with ClientSession(timeout=ClientTimeout(total=45)) as sess:
-            async with sess.post(api_url, headers=headers, json={
+        async with ClientSession(timeout=ClientTimeout(total=60)) as sess:
+            chat_url = await resolve_chat_url(sess, api_url, headers)
+            models = await fetch_model_ids(sess, api_url, headers)
+            async with sess.post(chat_url, headers=headers, json={
                 "model": body.get("model") or "gpt-4o-mini",
                 "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
                 "max_tokens": 10, "stream": False}) as r:
@@ -390,8 +472,21 @@ async def api_ai_test(request):
                 try:
                     reply = extract_content(data) or ""
                 except ValueError as e:
-                    return web.json_response({"ok": False, "error": str(e)})
-                return web.json_response({"ok": True, "reply": reply[:120]})
+                    return web.json_response({"ok": False, "error": str(e), "resolved": chat_url, "models": models[:20]})
+                return web.json_response({"ok": True, "reply": reply[:120], "resolved": chat_url, "models": models[:20]})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)[:250]})
+
+
+async def api_ai_models(request):
+    body = await request.json()
+    headers = {}
+    if body.get("api_key"):
+        headers["Authorization"] = "Bearer " + str(body["api_key"]).strip()
+    try:
+        async with ClientSession(timeout=ClientTimeout(total=30)) as sess:
+            models = await fetch_model_ids(sess, str(body.get("api_url") or "").strip(), headers)
+        return web.json_response({"ok": True, "models": models[:200]})
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)[:250]})
 
@@ -401,3 +496,4 @@ def register_ai_routes(app):
     app.router.add_post("/api/ai/stop", api_ai_stop)
     app.router.add_get("/api/ai/status", api_ai_status)
     app.router.add_post("/api/ai/test", api_ai_test)
+    app.router.add_post("/api/ai/models", api_ai_models)
