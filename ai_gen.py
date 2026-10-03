@@ -199,9 +199,15 @@ def extract_content(data):
         c = m0.get("content")
         if isinstance(c, str) and c.strip():
             return c
-        if m0.get("reasoning"):
+        reasoning = m0.get("reasoning_content") or m0.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            if msg0.get("finish_reason") == "length":
+                # the model burned the whole token budget mid-thinking — nothing to mine
+                raise ValueError("reasoning model spent the whole token budget on thinking "
+                                 "(finish_reason=length, answer never written) — raise 'Max tokens / batch' "
+                                 "to 12000-16000 or use a non-reasoning model")
             # thinking models put the final JSON inside the reasoning text — mine it
-            return m0["reasoning"]
+            return reasoning
         if msg0.get("finish_reason") == "error":
             raise ValueError("provider failed to generate — try another model on this API. raw: "
                              + _raw_snip(data))
