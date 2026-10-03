@@ -381,6 +381,47 @@ def hf_dataset_info(repo, token=None):
     return {"repo": repo, "ok": True, "files": files[:20], "error": None}
 
 
+async def api_ds_hf_copy(request):
+    """Copy someone's public dataset to the user's own private HF dataset repo."""
+    body = await request.json()
+    repo = str(body.get("repo") or "").strip()
+    tok = env_vars().get("HF_TOKEN", "")
+    user = env_vars().get("HF_USER", "")
+    if not tok:
+        return web.json_response({"error": "no HF token — set it in Settings"}, status=400)
+    if not user:
+        return web.json_response({"error": "no HF username — set it in Settings"}, status=400)
+    info = hf_dataset_info(repo, tok)
+    if not info.get("ok") or not info.get("files"):
+        return web.json_response({"error": info.get("error") or "no data files"}, status=400)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", repo.split("/")[-1]).strip("-") or "dataset"
+    dest_repo = f"{user}/{stem}-dataset"
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=tok)
+        api.create_repo(dest_repo, repo_type="dataset", exist_ok=True, private=True)
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            hdr = _hf_headers(tok)
+            import urllib.request
+            for path in info["files"]:
+                url = f"{HF_BASE}/datasets/{repo}/resolve/main/{path}"
+                safe = re.sub(r"[^A-Za-z0-9._-]+", "_", path)
+                local = Path(td) / safe
+                req = urllib.request.Request(url, headers=hdr)
+                with urllib.request.urlopen(req, timeout=180) as r, local.open("wb") as f:
+                    shutil.copyfileobj(r, f)
+                api.upload_file(path_or_fileobj=str(local), path_in_repo=path,
+                                repo_id=dest_repo, repo_type="dataset",
+                                commit_message=f"copy of {repo}")
+        url = f"https://huggingface.co/datasets/{dest_repo}"
+        return web.json_response({"ok": True, "url": url, "files": info["files"]})
+    except ImportError:
+        return web.json_response({"error": "huggingface_hub not installed"}, status=500)
+    except Exception as e:
+        return web.json_response({"error": str(e)[:300]}, status=500)
+
+
 async def api_ds_hf_check(request):
     body = await request.json()
     repos = body.get("repos") or []
@@ -406,3 +447,4 @@ def register_train_routes(app):
     app.router.add_post("/api/train/command", api_train_command)
     app.router.add_post("/api/ds/push", api_ds_push)
     app.router.add_post("/api/ds/hf_check", api_ds_hf_check)
+    app.router.add_post("/api/ds/hf_copy", api_ds_hf_copy)
