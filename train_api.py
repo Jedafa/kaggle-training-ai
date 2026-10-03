@@ -166,13 +166,13 @@ def launch_training(body):
         gpu_count = len([l for l in out.stdout.splitlines() if l.strip().startswith("GPU")])
     except Exception:
         gpu_count = 0
-    if gpu_count >= 2 and not env.get("TRAINER_FAKE"):
+    if gpu_count >= 2 and not env.get("TRAINER_FAKE") and not env.get("PANEL_SINGLE_GPU"):
         cmd = [sys.executable, "-m", "accelerate", "launch", "--num_processes", str(gpu_count),
                "--multi_gpu", str(TRAINER), "--config", str(d / "train_config.json")]
         note = f"{gpu_count} GPUs data-parallel (DDP)"
     else:
         cmd = [sys.executable, str(TRAINER), "--config", str(d / "train_config.json")]
-        note = "single process"
+        note = "single process" + (" (PANEL_SINGLE_GPU=1)" if env.get("PANEL_SINGLE_GPU") else "")
     proc = subprocess.Popen(
         cmd, stdout=open(d / "train.log", "ab"), stderr=subprocess.STDOUT,
         start_new_session=True, env=env, cwd=str(PANEL_DIR))
