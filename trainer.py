@@ -141,50 +141,124 @@ def hf_download_dataset(repo, token, dest_dir):
     return got
 
 
-def collect_sources(cfg, rank=0):
-    """Return a list of (name, local_path) for every dataset source.
-    In DDP, rank 0 downloads; other ranks wait for the files to appear."""
-    tok = cfg.get("hf_token") or os.environ.get("HF_TOKEN", "")
-    out = []
+
+def sample_sources(cfg, run, tok, rank, failed):
+    """Lazily yield (source_name, text) for every dataset source.
+    HF shards download one-by-one DURING parsing and stop as soon as the
+    per-repo sample limit is reached; already-downloaded shards are reused."""
+    max_s = int(cfg.get("max_samples") or 0)
     ds_list = cfg.get("hf_datasets") or []
     if cfg.get("dataset_type") == "hf" and ds_list:
+        tok_src = cfg.get("hf_token") or os.environ.get("HF_TOKEN", "")
         prio = {".jsonl": 0, ".csv": 1, ".parquet": 2, ".json": 3, ".txt": 4}
         for repo in ds_list:
-            files = hf_list_dataset_files(repo, tok)  # every rank lists (cheap)
-            # same data often ships as .jsonl + .parquet — keep one format per stem
-            by_stem = {}
-            for p in files:
-                stem = re.sub(r"\.(jsonl|json|csv|parquet|txt)$", "", p, flags=re.I).lower()
-                ext = "." + p.rsplit(".", 1)[-1].lower()
-                cur = by_stem.get(stem)
-                if cur is None or prio.get(ext, 9) < prio.get("." + cur.rsplit(".", 1)[-1].lower(), 9):
-                    by_stem[stem] = p
-            files = sorted(by_stem.values())
-            per_file_limit = None
-            ms = int(cfg.get("max_samples") or 0)
-            if ms and files:
-                per_file_limit = max(50, -(-ms // len(files)))  # split repo limit across files
-            for path in files:
-                safe = re.sub(r"[^A-Za-z0-9._/-]", "_", path)
-                out_path = BASE / "uploads" / "hf" / safe.replace("/", "__")
-                if rank == 0:
-                    hf_download_file(repo, path, out_path, tok)
-                else:
-                    t0 = time.time()
-                    while not out_path.exists() and time.time() - t0 < 1200:
-                        time.sleep(5)
-                    if not out_path.exists():
-                        raise RuntimeError(f"waiting for {out_path.name} timed out")
-                out.append((repo, out_path, per_file_limit))
-        return out
-    name = {"url": "downloaded", "file": Path(cfg["dataset_value"]).name,
-            "hf": ",".join(ds_list)}.get(cfg["dataset_type"], "dataset")
-    if rank == 0:
-        return [(name, fetch_dataset(cfg), None)]
-    t0 = time.time()
-    while not Path(cfg["dataset_value"]).exists() and time.time() - t0 < 1200:
-        time.sleep(5)
-    return [(name, Path(cfg["dataset_value"]), None)]
+            got = 0
+            try:
+                files = hf_list_dataset_files(repo, tok_src)
+                by_stem = {}
+                for p in files:
+                    stem = re.sub(r"\.(jsonl|json|csv|parquet|txt)$", "", p, flags=re.I).lower()
+                    ext = "." + p.rsplit(".", 1)[-1].lower()
+                    cur = by_stem.get(stem)
+                    if cur is None or prio.get(ext, 9) < prio.get("." + cur.rsplit(".", 1)[-1].lower(), 9):
+                        by_stem[stem] = p
+                files = sorted(by_stem.values())
+                per_file = max(50, -(-max_s // max(1, len(files)))) if (max_s and files) else None
+                for idx, path in enumerate(files):
+                    if max_s and got >= max_s:
+                        break
+                    safe = re.sub(r"[^A-Za-z0-9._/-]", "_", path)
+                    out_path = BASE / "uploads" / "hf" / safe.replace("/", "__")
+                    if rank == 0:
+                        if out_path.exists() and out_path.stat().st_size > 0:
+                            run.set_state(message=f"reusing {repo} shard {idx+1}/{len(files)} (already downloaded)")
+                        else:
+                            run.set_state(message=f"downloading {repo} shard {idx+1}/{len(files)}…")
+                            try:
+                                hf_download_file(repo, path, out_path, tok_src)
+                            except Exception as e:
+                                failed.append((repo + "/" + path, str(e)[:150]))
+                                run.set_state(message=f"download failed: {path} — excluded")
+                                continue
+                    else:
+                        t0 = time.time()
+                        while not (out_path.exists() and out_path.stat().st_size > 0):
+                            if time.time() - t0 > 1800:
+                                raise RuntimeError(f"waiting for {out_path.name} timed out")
+                            time.sleep(5)
+                    n = 0
+                    for text in iter_dataset(out_path, tok, cfg["max_seq"]):
+                        yield (repo, text)
+                        got += 1
+                        n += 1
+                        if max_s and got >= max_s:
+                            break
+                        if per_file and n >= per_file:
+                            break
+                    log(f"hf {repo}: shard {idx+1}/{len(files)} -> {n} samples (total {got})")
+                    run.set_state(message=f"{repo}: {got}/{max_s or 'unlimited'} samples")
+            except Exception as e:
+                failed.append((repo, str(e)[:150]))
+                run.set_state(message=f"repo excluded: {repo} ({str(e)[:100]})")
+    else:
+        name = {"url": "downloaded", "file": Path(cfg["dataset_value"]).name}.get(
+            cfg["dataset_type"], "dataset")
+        if rank == 0:
+            path = fetch_dataset(cfg)
+        else:
+            t0 = time.time()
+            while not Path(cfg["dataset_value"]).exists() and time.time() - t0 < 1200:
+                time.sleep(5)
+            path = Path(cfg["dataset_value"])
+        n = 0
+        for text in iter_dataset(path, tok, cfg["max_seq"]):
+            if max_s and n >= max_s:
+                break
+            n += 1
+            yield (name, text)
+
+
+def pack_from_samples(sample_gen, run, tok, cfg):
+    """Stream samples -> tokenize -> pack blocks. Memory O(max_seq)."""
+    counts = {}
+    order = []
+    blocks = []
+    src_of_block = []
+    ids = []
+    cur = None
+    total_samples = 0
+    eos = tok.eos_token_id or 0
+    max_seq = cfg["max_seq"]
+    HARD = 400_000
+    hard = False
+    for sname, text in sample_gen:
+        if cur is not None and sname != cur and len(ids) >= max_seq:
+            blocks.append(ids[:max_seq]); src_of_block.append(cur)
+            counts[cur] = counts.get(cur, 0) + 1
+            ids = []
+        cur = sname
+        ids.extend(tok(text, add_special_tokens=True, truncation=True,
+                       max_length=max_seq)["input_ids"])
+        ids.append(eos)
+        while len(ids) >= max_seq:
+            blocks.append(ids[:max_seq]); src_of_block.append(cur)
+            counts[cur] = counts.get(cur, 0) + 1
+            ids = ids[max_seq:]
+            if len(blocks) >= HARD:
+                hard = True
+                break
+        total_samples += 1
+        if sname not in order:
+            order.append(sname)
+        if hard:
+            break
+        if total_samples % 2000 == 0:
+            run.set_state(message=f"packed {total_samples} samples… (dataset: {cur})")
+    if not hard and cur is not None and len(ids) >= max_seq // 2:
+        blocks.append(ids[:max_seq]); src_of_block.append(cur)
+        counts[cur] = counts.get(cur, 0) + 1
+    ok_srcs = [s for s in order if counts.get(s, 0) > 0]
+    return blocks, src_of_block, counts, ok_srcs, total_samples
 
 
 def iter_dataset(path, tokenizer, max_seq):
@@ -399,10 +473,11 @@ def train_real(cfg, run, rank=0, world=1):
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
-    sources = collect_sources(cfg, rank)
-    log(f"dataset sources: {[(n, Path(p).name) for n, p in sources]}")
-    blocks, src_of_block, counts, ok_srcs, failed, total_samples = \
-        pack_sources(cfg, run, sources, tok, rank, world)
+    failed = []
+    def sample_gen():
+        yield from sample_sources(cfg, run, tok, rank, failed)
+    blocks, src_of_block, counts, ok_srcs, total_samples = \
+        pack_from_samples(sample_gen(), run, tok, cfg)
     log(f"packed blocks (len={cfg['max_seq']}): {len(blocks)}; ok sources: {ok_srcs}")
     if not blocks:
         raise RuntimeError("dataset too small for one block — lower max_seq or add data")
@@ -766,9 +841,11 @@ def train_scratch(cfg, run, rank=0, world=1):
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
-    sources = collect_sources(cfg, rank)
-    blocks, src_of_block, counts, ok_srcs, failed, total_samples = \
-        pack_sources(cfg, run, sources, tok, rank, world)
+    failed = []
+    def sample_gen():
+        yield from sample_sources(cfg, run, tok, rank, failed)
+    blocks, src_of_block, counts, ok_srcs, total_samples = \
+        pack_from_samples(sample_gen(), run, tok, cfg)
     log(f"packed blocks: {len(blocks)}")
     if not blocks:
         raise RuntimeError("dataset too small for one block")

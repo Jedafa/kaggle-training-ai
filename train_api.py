@@ -160,6 +160,7 @@ def launch_training(body):
     env = os.environ.copy()
     if cfg["hf_token"]:
         env["HF_TOKEN"] = cfg["hf_token"]
+    env["PYTHONUNBUFFERED"] = "1"  # survive accelerate output buffering
     gpu_count = 0
     try:
         out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=10)
