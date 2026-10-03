@@ -197,8 +197,13 @@ def sample_sources(cfg, run, tok, rank, failed):
                             break
                     if n == 0:
                         try:
-                            head = out_path.read_text(errors="ignore")[:300].replace("\n", " ")
-                            log(f"hf {repo}: shard {idx+1} yielded 0 samples — RAW CONTENT: {head}")
+                            first = json.loads(out_path.open(errors="ignore").readline())
+                            keys = list(first.keys()) if isinstance(first, dict) else []
+                            empties = [k for k, v in (first.items() if isinstance(first, dict) else [])
+                                       if isinstance(v, str) and not v.strip()]
+                            log(f"hf {repo}: shard {idx+1} yielded 0 samples — schema: {keys}"
+                                f"{', EMPTY fields: ' + ', '.join(empties) if empties else ''} "
+                                f"— RAW: {json.dumps(first, ensure_ascii=False)[:200]}")
                         except Exception:
                             pass
                     log(f"hf {repo}: shard {idx+1}/{len(files)} -> {n} samples (total {got})")
