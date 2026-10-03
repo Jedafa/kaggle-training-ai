@@ -167,8 +167,15 @@ def launch_training(body):
     except Exception:
         gpu_count = 0
     if gpu_count >= 2 and not env.get("TRAINER_FAKE") and not env.get("PANEL_SINGLE_GPU"):
-        cmd = [sys.executable, "-m", "accelerate", "launch", "--num_processes", str(gpu_count),
-               "--multi_gpu", str(TRAINER), "--config", str(d / "train_config.json")]
+        accel_bin = shutil.which("accelerate")
+        if accel_bin:
+            cmd = [accel_bin, "launch", "--num_processes", str(gpu_count),
+                   "--multi_gpu", str(TRAINER), "--config", str(d / "train_config.json")]
+        else:
+            # torchrun is part of torch — always available
+            cmd = [sys.executable, "-m", "torch.distributed.run",
+                   "--nproc_per_node", str(gpu_count), str(TRAINER),
+                   "--config", str(d / "train_config.json")]
         note = f"{gpu_count} GPUs data-parallel (DDP)"
     else:
         cmd = [sys.executable, str(TRAINER), "--config", str(d / "train_config.json")]
