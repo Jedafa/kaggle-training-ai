@@ -279,6 +279,32 @@ def _zip_run(name):
     return out
 
 
+async def api_ds_push(request):
+    body = await request.json()
+    name = safe_name(body.get("name"), "dataset.bin")
+    f = UPLOADS / name
+    if not f.exists():
+        return web.json_response({"error": "no such dataset"}, status=404)
+    tok = env_vars().get("HF_TOKEN", "")
+    if not tok:
+        return web.json_response({"error": "no HF token — set it in Settings"}, status=400)
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=tok)
+        who = api.whoami()["name"]
+        stem = Path(name).stem
+        repo = f"{who}/{stem}-dataset"
+        api.create_repo(repo, repo_type="dataset", exist_ok=True, private=True)
+        api.upload_file(path_or_fileobj=str(f), path_in_repo="dataset.jsonl",
+                        repo_id=repo, repo_type="dataset")
+        url = f"https://huggingface.co/datasets/{repo}"
+        return web.json_response({"ok": True, "url": url})
+    except ImportError:
+        return web.json_response({"error": "huggingface_hub not installed"}, status=500)
+    except Exception as e:
+        return web.json_response({"error": str(e)[:300]}, status=500)
+
+
 async def api_train_command(request):
     body = await request.json()
     name = safe_name(body.get("run"))
@@ -307,3 +333,4 @@ def register_train_routes(app):
     app.router.add_get("/api/train/download/{run}", api_train_download)
     app.router.add_post("/api/train/delete", api_train_delete)
     app.router.add_post("/api/train/command", api_train_command)
+    app.router.add_post("/api/ds/push", api_ds_push)

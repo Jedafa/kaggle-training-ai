@@ -54,6 +54,7 @@ const I18N = {
     ai_autotrain: "Auto-start training when done", ai_keynote: "key stays in memory only",
     ai_generate: "Generate dataset", ai_test: "Test API", ai_use: "Use this dataset ↓",
     ai_need_prompt: "Describe the dataset first",
+    ai_savehf: "Save dataset to HuggingFace", ds_push: "↑ HF",
   },
   ru: {
     subtitle: "обучи · запусти · выпусти свою модель", password: "Пароль", login: "Войти",
@@ -107,6 +108,7 @@ const I18N = {
     ai_autotrain: "Автостарт обучения после генерации", ai_keynote: "ключ хранится только в памяти",
     ai_generate: "Сгенерировать датасет", ai_test: "Проверить API", ai_use: "Использовать этот датасет ↓",
     ai_need_prompt: "Сначала опиши датасет",
+    ai_savehf: "Сохранить датасет на HuggingFace", ds_push: "↑ HF",
   },
   zh: {
     subtitle: "训练 · 部署 · 发布你自己的模型", password: "密码", login: "登录",
@@ -160,6 +162,7 @@ const I18N = {
     ai_autotrain: "完成后自动开始训练", ai_keynote: "密钥只存于内存",
     ai_generate: "生成数据集", ai_test: "测试 API", ai_use: "使用此数据集 ↓",
     ai_need_prompt: "先描述数据集",
+    ai_savehf: "保存数据集到 HuggingFace", ds_push: "↑ HF",
   },
 };
 
@@ -435,6 +438,8 @@ $("#ds-file").addEventListener("change", async () => {
     if (!r.ok || !d.ok) throw new Error(d.error || "fail");
     state.uploadedName = d.name; state.uploadedSize = d.size;
     $("#ds-file-name").textContent = `${d.name} · ${fmtBytes(d.size)} ✓`;
+    $("#ds-push").classList.remove("hidden");
+    $("#ds-hf-link").classList.add("hidden");
     toast(t("toast_uploaded"));
   } catch { toast("⚠ " + t("toast_fail")); }
 });
@@ -743,6 +748,8 @@ $("#ai-start").addEventListener("click", async () => {
       temperature: +$("#ai-temp").value || 0.9,
       ref_urls: $("#ai-refs").value.trim(),
       auto_train: $("#ai-autotrain").checked,
+      save_ds_hf: $("#ai-savehf").checked,
+      hf_token: $("#env-hf").value.trim(),
       dataset_name: ($("#cfg-name").value.trim() || "ai") + "-ds",
       train: {
         base_model: modelInput.value.trim(),
@@ -778,6 +785,20 @@ $("#ai-use-ds").addEventListener("click", () => {
   $("#ds-file-name").textContent = state.uploadedName + " · AI ✓";
   toast("↓ " + state.uploadedName);
 });
+$("#ds-push").addEventListener("click", async () => {
+  if (!state.uploadedName) return;
+  $("#ds-push").disabled = true;
+  try {
+    const d = await apiPost("/api/ds/push", { name: state.uploadedName });
+    if (d.ok) {
+      toast("↑ HF ✓");
+      const a = $("#ds-hf-link");
+      a.classList.remove("hidden"); a.href = d.url; a.textContent = "HF ↗";
+    } else toast("⚠ " + d.error);
+  } catch { toast("⚠ " + t("toast_fail")); }
+  $("#ds-push").disabled = false;
+});
+
 function renderAi(d) {
   const st = d || {};
   const active = st.status === "running";
@@ -801,7 +822,8 @@ function renderAi(d) {
   if (st.status === "done") {
     state.dsMode = "file";
     state.uploadedName = (st.dataset_file || "").split("/").pop();
-    if (st.auto_train && st.auto_train && st.auto_train.ok) state.runName = st.auto_train.run || state.runName;
+    if (st.auto_train && st.auto_train.ok) state.runName = st.auto_train.run || state.runName;
+    if (st.ds_hf_url) toast("↑ HF ✓ " + st.ds_hf_url.replace("https://huggingface.co/datasets/", ""));
   }
 }
 
