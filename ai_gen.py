@@ -392,6 +392,8 @@ async def generate_job(cfg):
             ok, resp = launch_training(body)
             write_state(auto_train=resp)
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         write_state(status="error", error=str(e)[:400],
                     message="generation failed", dataset_file=str(ds_path) if written else None)
 
@@ -519,6 +521,16 @@ async def api_ai_models(request):
         return web.json_response({"ok": True, "models": models[:200]})
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)[:250]})
+
+
+def mark_interrupted_on_start():
+    """If the panel restarted mid-generation, don't leave a zombie 'running' state."""
+    st = read_state()
+    if st.get("status") == "running":
+        write_state(status="interrupted",
+                    message="panel restarted during generation — start again "
+                            f"(was at {st.get('generated', 0)}/{st.get('total', 0)}; "
+                            "partial dataset kept, press Use this dataset or generate more)")
 
 
 def register_ai_routes(app):
