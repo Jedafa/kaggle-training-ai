@@ -173,6 +173,119 @@ def collect_sources(cfg, rank=0):
     return [(name, Path(cfg["dataset_value"]))]
 
 
+def iter_dataset(path, tokenizer, max_seq):
+    """Memory-safe streaming parser: jsonl/csv/parquet/txt yield sample texts one by one."""
+    suf = path.suffix.lower()
+    if suf == ".jsonl":
+        with path.open(errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    it = json.loads(line)
+                except ValueError:
+                    continue
+                t = item_to_text(it, tokenizer)
+                if t and t.strip():
+                    yield t
+    elif suf == ".csv":
+        import csv
+        with path.open(errors="ignore") as f:
+            for row in csv.DictReader(f):
+                t = item_to_text(row, tokenizer)
+                if t and t.strip():
+                    yield t
+    elif suf == ".parquet":
+        try:
+            import pyarrow.parquet as pq
+        except ImportError:
+            raise RuntimeError("parquet needs pyarrow - pip install pyarrow")
+        pf = pq.ParquetFile(str(path))
+        for batch in pf.iter_batches(batch_size=1024):
+            for row in batch.to_pylist():
+                t = item_to_text(row, tokenizer)
+                if t and t.strip():
+                    yield t
+    elif suf == ".json":
+        if path.stat().st_size > (1 << 30):
+            raise RuntimeError(".json over 1GB - split it into .jsonl (one object per line)")
+        items = json.loads(path.read_text(errors="ignore"))
+        if isinstance(items, dict):
+            items = [items]
+        for it in items:
+            t = item_to_text(it, tokenizer)
+            if t and t.strip():
+                yield t
+    else:
+        with path.open(errors="ignore") as f:
+            while True:
+                chunk = f.read(max_seq * 4)
+                if not chunk:
+                    break
+                if chunk.strip():
+                    yield chunk
+
+
+def pack_sources(cfg, run, sources, tok, rank, world):
+    """Stream every source -> tokenize -> pack blocks (memory O(max_seq)).
+    Returns (blocks, src_of_block, counts, ok_srcs, failed, total_samples)."""
+    failed = []
+    counts = {}
+    order = []
+    blocks = []
+    src_of_block = []
+    ids = []
+    cur = None
+    total_samples = 0
+    eos = tok.eos_token_id or 0
+    max_seq = cfg["max_seq"]
+    max_s = int(cfg.get("max_samples") or 0)
+    HARD_BLOCKS = 400_000
+    hard_hit = False
+    for sname, spath in sources:
+        try:
+            n = 0
+            for text in iter_dataset(Path(spath), tok, max_seq):
+                if cur is not None and sname != cur and len(ids) >= max_seq:
+                    blocks.append(ids[:max_seq]); src_of_block.append(cur)
+                    counts[cur] = counts.get(cur, 0) + 1
+                    ids = []
+                cur = sname
+                ids.extend(tok(text, add_special_tokens=True, truncation=True,
+                               max_length=max_seq)["input_ids"])
+                ids.append(eos)
+                while len(ids) >= max_seq:
+                    blocks.append(ids[:max_seq]); src_of_block.append(cur)
+                    counts[cur] = counts.get(cur, 0) + 1
+                    ids = ids[max_seq:]
+                    if len(blocks) >= HARD_BLOCKS:
+                        hard_hit = True
+                        break
+                n += 1
+                total_samples += 1
+                if sname not in order:
+                    order.append(sname)
+                if n % 5000 == 0:
+                    run.set_state(message=f"packing {sname}: {n} samples…",
+                                  current_dataset=sname)
+                if hard_hit or (max_s and n >= max_s):
+                    break
+            log(f"source {'ok' if n else 'EMPTY'}: {sname} — {n} samples")
+        except Exception as e:
+            failed.append((sname, str(e)[:150]))
+            log(f"source FAILED, excluded: {sname} — {e}")
+        if hard_hit or len(blocks) >= HARD_BLOCKS:
+            break
+    if not hard_hit and len(ids) >= max_seq // 2:
+        blocks.append(ids[:max_seq]); src_of_block.append(cur)
+        counts[cur] = counts.get(cur, 0) + 1
+    ok_srcs = [s for s in order if counts.get(s, 0) > 0]
+    if hard_hit:
+        run.set_state(message="hard cap 400k blocks reached - train on this, then continue from checkpoint for more")
+    return blocks, src_of_block, counts, ok_srcs, failed, total_samples
+
+
 def item_to_text(it, tokenizer):
     if not isinstance(it, dict):
         return str(it)
@@ -273,45 +386,9 @@ def train_real(cfg, run, rank=0, world=1):
 
     sources = collect_sources(cfg, rank)
     log(f"dataset sources: {[(n, Path(p).name) for n, p in sources]}")
-    all_samples = []          # (src_name, text)
-    failed = []
-    max_s = int(cfg.get("max_samples") or 0)
-    for sname, spath in sources:
-        try:
-            s_list = parse_dataset(Path(spath), tok, cfg["max_seq"])
-            if max_s:
-                s_list = s_list[:max_s]
-            all_samples.extend((sname, s) for s in s_list)
-            log(f"source ok: {sname} — {len(s_list)} samples")
-        except Exception as e:
-            failed.append((sname, str(e)[:120]))
-            log(f"source FAILED, excluded: {sname} — {e}")
-    if not all_samples:
-        raise RuntimeError("all dataset sources failed to parse: " + "; ".join(f"{n}: {e}" for n, e in failed))
-    ok_srcs = sorted({n for n, _ in all_samples})
-    log(f"usable sources: {ok_srcs}; samples: {len(all_samples)}; failed: {failed}")
-
-    # pack blocks keeping their source for position tracking
-    blocks = []
-    src_of_block = []
-    ids = []
-    cur_src = None
-    eos = tok.eos_token_id or 0
-    for sname, s in all_samples:
-        if cur_src is not None and sname != cur_src:
-            if len(ids) >= cfg["max_seq"]:
-                blocks.append(ids[:cfg["max_seq"]]); src_of_block.append(cur_src)
-            ids = []
-        cur_src = sname
-        ids.extend(tok(s, add_special_tokens=True, truncation=True,
-                       max_length=cfg["max_seq"])["input_ids"])
-        ids.append(eos)
-        while len(ids) >= cfg["max_seq"]:
-            blocks.append(ids[:cfg["max_seq"]]); src_of_block.append(cur_src)
-            ids = ids[cfg["max_seq"]:]
-    if len(ids) >= cfg["max_seq"] // 2:
-        blocks.append(ids[:cfg["max_seq"]]); src_of_block.append(cur_src)
-    log(f"packed blocks (len={cfg['max_seq']}): {len(blocks)}")
+    blocks, src_of_block, counts, ok_srcs, failed, total_samples = \
+        pack_sources(cfg, run, sources, tok, rank, world)
+    log(f"packed blocks (len={cfg['max_seq']}): {len(blocks)}; ok sources: {ok_srcs}")
     if not blocks:
         raise RuntimeError("dataset too small for one block — lower max_seq or add data")
 
@@ -675,52 +752,12 @@ def train_scratch(cfg, run, rank=0, world=1):
         tok.pad_token = tok.eos_token
 
     sources = collect_sources(cfg, rank)
-    all_samples = []
-    failed = []
-    max_s = int(cfg.get("max_samples") or 0)
-    for sname, spath in sources:
-        try:
-            s_list = parse_dataset(Path(spath), tok, cfg["max_seq"])
-            if max_s:
-                s_list = s_list[:max_s]
-            all_samples.extend((sname, s) for s in s_list)
-            log(f"source ok: {sname} — {len(s_list)} samples")
-        except Exception as e:
-            failed.append((sname, str(e)[:120]))
-            log(f"source FAILED, excluded: {sname} — {e}")
-    if not all_samples:
-        raise RuntimeError("all dataset sources failed to parse")
-    ok_srcs = sorted({n for n, _ in all_samples})
-
-    size = SCRATCH_SIZES.get(cfg.get("scratch_size") or "small", SCRATCH_SIZES["small"])
-    config = LlamaConfig(vocab_size=len(tok), max_position_embeddings=2048,
-                         rms_norm_eps=1e-5, **size)
-    n_params = sum(p.numel() for p in LlamaForCausalLM(config).parameters())
-    log(f"scratch model: {cfg.get('scratch_size')} — {n_params/1e6:.0f}M params")
-
-    blocks = []
-    src_of_block = []
-    ids = []
-    cur_src = None
-    eos = tok.eos_token_id or 0
-    for sname, s in all_samples:
-        if cur_src is not None and sname != cur_src and len(ids) >= cfg["max_seq"]:
-            blocks.append(ids[:cfg["max_seq"]]); src_of_block.append(cur_src)
-            ids = []
-        cur_src = sname
-        ids.extend(tok(s, add_special_tokens=True, truncation=True,
-                       max_length=cfg["max_seq"])["input_ids"])
-        ids.append(eos)
-        while len(ids) >= cfg["max_seq"]:
-            blocks.append(ids[:cfg["max_seq"]]); src_of_block.append(cur_src)
-            ids = ids[cfg["max_seq"]:]
-    if len(ids) >= cfg["max_seq"] // 2:
-        blocks.append(ids[:cfg["max_seq"]]); src_of_block.append(cur_src)
+    blocks, src_of_block, counts, ok_srcs, failed, total_samples = \
+        pack_sources(cfg, run, sources, tok, rank, world)
+    log(f"packed blocks: {len(blocks)}")
     if not blocks:
         raise RuntimeError("dataset too small for one block")
-    counts = {}
-    for b in src_of_block:
-        counts[b] = counts.get(b, 0) + 1
+
     eff = max(1, cfg["batch_size"] * cfg["grad_accum"] * world)
     total_steps = max(1, (len(blocks) * cfg["epochs"]) // eff)
     steps_per_src, acc = [], 0
