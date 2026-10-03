@@ -211,10 +211,13 @@ async def generate_job(cfg):
                     content = extract_content(data)
                 except Exception as e:
                     batch_errors += 1
-                    write_state(message=f"batch error ({batch_errors}): {str(e)[:160]}")
+                    write_state(message=f"batch error ({batch_errors}): {str(e)[:160]} — retrying")
                     if batch_errors >= 5:
-                        raise RuntimeError(f"too many API failures: {e}")
-                    await asyncio.sleep(3)
+                        if written > 0:
+                            log(f"API keeps failing — finishing with {written} samples")
+                            break
+                        raise RuntimeError(f"API keeps failing: {e}")
+                    await asyncio.sleep(3 * batch_errors)  # backoff
                     continue
 
                 items = parse_items(content)
