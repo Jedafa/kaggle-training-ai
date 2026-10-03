@@ -132,7 +132,18 @@ const I18N = {
 
 const $ = (s) => document.querySelector(s);
 window.__jsErrors = [];
-window.addEventListener("error", (e) => window.__jsErrors.push(String(e.message).slice(0, 120)));
+window.addEventListener("error", (e) => {
+  const msg = String(e.message || e).slice(0, 140);
+  window.__jsErrors.push(msg);
+  try {
+    const el = document.createElement("div");
+    el.className = "toast";
+    el.style.borderColor = "var(--coral)";
+    el.textContent = "⚠ JS: " + msg;
+    document.getElementById("toasts").appendChild(el);
+    setTimeout(() => el.remove(), 8000);
+  } catch {}
+});
 const state = {
   token: localStorage.getItem("panel_token") || "",
   lang: localStorage.getItem("panel_lang") || "en",
