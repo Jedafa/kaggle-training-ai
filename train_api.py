@@ -1,0 +1,287 @@
+"""Training orchestration API — runs, dataset uploads, progress, export."""
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import zipfile
+from pathlib import Path
+
+from aiohttp import web
+
+HOME = Path.home()
+BASE = HOME / ".kaggle-panel"
+RUNS = BASE / "runs"
+UPLOADS = BASE / "uploads"
+PANEL_DIR = Path(__file__).resolve().parent
+TRAINER = PANEL_DIR / "trainer.py"
+
+_live = {}  # run_name -> Popen
+
+ACTIVE_STATUSES = ("preparing", "training", "merging", "gguf", "ollama", "hf_upload", "stopping")
+FINAL_STATUSES = ("done", "error", "stopped")
+
+
+def safe_name(s, fallback="run"):
+    s = re.sub(r"[^A-Za-z0-9._-]", "_", str(s or "").strip())
+    s = s.strip("._") or fallback
+    return s[:64]
+
+
+def run_dir(name):
+    return RUNS / name
+
+
+def state_path(name):
+    return run_dir(name) / "state.json"
+
+
+def read_state(name):
+    try:
+        return json.loads(state_path(name).read_text())
+    except Exception:
+        return {"run": name, "status": "unknown", "phase": "", "step": 0,
+                "total_steps": 0, "loss": None, "message": "", "error": None}
+
+
+def write_state(name, patch):
+    d = run_dir(name)
+    d.mkdir(parents=True, exist_ok=True)
+    st = read_state(name)
+    st.update(patch)
+    st["updated_at"] = time.time()
+    tmp = state_path(name).with_suffix(".tmp")
+    tmp.write_text(json.dumps(st, indent=2, ensure_ascii=False))
+    tmp.replace(state_path(name))
+    return st
+
+
+def env_vars():
+    vals = {}
+    f = BASE / ".env"
+    if f.exists():
+        for line in f.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                vals[k.strip()] = v.strip().strip('"')
+    return vals
+
+
+def _proc_alive(name):
+    proc = _live.get(name)
+    if proc is not None:
+        return proc.poll() is None
+    pf = run_dir(name) / "train.pid"
+    if pf.exists():
+        try:
+            os.kill(int(pf.read_text().strip()), 0)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+async def api_train_start(request):
+    body = await request.json()
+    for n, p in list(_live.items()):
+        if p.poll() is None:
+            return web.json_response({"error": "already_training", "run": n}, status=409)
+
+    name = safe_name(body.get("run_name") or f"run-{secrets.token_hex(3)}")
+    st = read_state(name)
+    if st.get("status") in ACTIVE_STATUSES and _proc_alive(name):
+        return web.json_response({"error": "run_in_progress", "run": name}, status=409)
+
+    dstype = body.get("dataset_type")
+    value = str(body.get("dataset_value") or "").strip()
+    if dstype == "url":
+        if not re.match(r"^https?://", value):
+            return web.json_response({"error": "bad_dataset_url"}, status=400)
+    elif dstype == "file":
+        p = UPLOADS / safe_name(value, "dataset.bin")
+        if not p.exists():
+            return web.json_response({"error": "dataset_not_found"}, status=400)
+        value = str(p)
+    else:
+        return web.json_response({"error": "dataset_type must be url|file"}, status=400)
+
+    cfg = {
+        "run_name": name,
+        "base_model": str(body.get("base_model") or "unsloth/Llama-3.2-3B-Instruct").strip(),
+        "dataset_type": dstype,
+        "dataset_value": value,
+        "epochs": float(body.get("epochs") or 3),
+        "lr": float(body.get("lr") or 2e-4),
+        "batch_size": int(body.get("batch_size") or 2),
+        "grad_accum": int(body.get("grad_accum") or 4),
+        "max_seq": int(body.get("max_seq") or 1024),
+        "lora_r": int(body.get("lora_r") or 16),
+        "save_steps": int(body.get("save_steps") or 100),
+        "resume_from": str(body.get("resume_from") or "").strip() or None,
+        "gguf_outtype": body.get("gguf_outtype") if body.get("gguf_outtype") in ("q8_0", "f16") else "q8_0",
+        "ollama_import": bool(body.get("ollama_import", True)),
+        "ollama_name": safe_name(body.get("ollama_name") or name).lower(),
+        "hf_upload": bool(body.get("hf_upload", False)),
+        "hf_repo": str(body.get("hf_repo") or "").strip() or None,
+        "hf_token": str(body.get("hf_token") or "").strip() or env_vars().get("HF_TOKEN", ""),
+        "created_at": time.time(),
+    }
+    d = run_dir(name)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "train_config.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+    (d / "train.log").write_text("")
+
+    # training takes all VRAM — stop ollama first
+    subprocess.run(["pkill", "-x", "ollama"], capture_output=True)
+
+    env = os.environ.copy()
+    if cfg["hf_token"]:
+        env["HF_TOKEN"] = cfg["hf_token"]
+    proc = subprocess.Popen(
+        [sys.executable, str(TRAINER), "--config", str(d / "train_config.json")],
+        stdout=open(d / "train.log", "ab"), stderr=subprocess.STDOUT,
+        start_new_session=True, env=env, cwd=str(PANEL_DIR))
+    _live[name] = proc
+    write_state(name, {"status": "preparing", "phase": "prepare", "pid": proc.pid,
+                       "error": None, "message": "trainer started (ollama stopped to free VRAM)"})
+    return web.json_response({"ok": True, "run": name, "note": "ollama stopped for training"})
+
+
+async def api_train_stop(request):
+    body = await request.json()
+    name = safe_name(body.get("run"))
+    killed = False
+    proc = _live.pop(name, None)
+    if proc and proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            killed = True
+        except Exception:
+            pass
+    pf = run_dir(name) / "train.pid"
+    if not killed and pf.exists():
+        try:
+            os.killpg(os.getpgid(int(pf.read_text().strip())), signal.SIGTERM)
+            killed = True
+        except Exception:
+            pass
+    if killed:
+        write_state(name, {"status": "stopping", "message": "stop requested"})
+        return web.json_response({"ok": True, "run": name})
+    return web.json_response({"error": "not running"}, status=404)
+
+
+async def api_train_status(request):
+    name = safe_name(request.query.get("run", ""))
+    st = read_state(name)
+    if st.get("status") in ACTIVE_STATUSES and not _proc_alive(name):
+        # trainer died without writing a final state
+        st = write_state(name, {"status": "error",
+                                "error": "trainer exited unexpectedly — see train.log"})
+    points = []
+    pf = run_dir(name) / "progress.jsonl"
+    if pf.exists():
+        lines = pf.read_text().splitlines()[-400:]
+        for line in lines:
+            try:
+                points.append(json.loads(line))
+            except ValueError:
+                pass
+    log_tail = []
+    lf = run_dir(name) / "train.log"
+    if lf.exists():
+        log_tail = lf.read_text(errors="ignore").splitlines()[-40:]
+    return web.json_response({"state": st, "points": points, "log": log_tail})
+
+
+async def api_train_list(request):
+    runs = []
+    if RUNS.exists():
+        for d in sorted(RUNS.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+            if not d.is_dir():
+                continue
+            st = read_state(d.name)
+            st["name"] = d.name
+            st["running"] = _proc_alive(d.name)
+            runs.append(st)
+    datasets = sorted(f.name for f in UPLOADS.iterdir()) if UPLOADS.exists() else []
+    return web.json_response({"runs": runs, "datasets": datasets})
+
+
+async def api_train_upload(request):
+    reader = await request.multipart()
+    field = None
+    while True:
+        part = await reader.next()
+        if part is None:
+            break
+        if part.name == "file":
+            field = part
+            break
+    if field is None:
+        return web.json_response({"error": "no file field"}, status=400)
+    fname = safe_name(field.filename or "dataset.bin", "dataset.bin")
+    UPLOADS.mkdir(parents=True, exist_ok=True)
+    dest = UPLOADS / fname
+    size = 0
+    with dest.open("wb") as f:
+        while True:
+            chunk = await field.read_chunk(1 << 20)
+            if not chunk:
+                break
+            size += len(chunk)
+            f.write(chunk)
+    return web.json_response({"ok": True, "name": fname, "size": size})
+
+
+async def api_train_delete(request):
+    body = await request.json()
+    name = safe_name(body.get("run"))
+    if name in _live and _live[name].poll() is None:
+        return web.json_response({"error": "stop the run first"}, status=409)
+    shutil.rmtree(run_dir(name), ignore_errors=True)
+    _live.pop(name, None)
+    return web.json_response({"ok": True})
+
+
+def _zip_run(name):
+    d = run_dir(name)
+    st = read_state(name)
+    out = Path("/tmp") / f"{name}-export.zip"
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as z:
+        for rel in ("train_config.json", "Modelfile"):
+            if (d / rel).exists():
+                z.write(d / rel, rel)
+        gg = st.get("gguf_path")
+        if gg and Path(gg).exists():
+            z.write(Path(gg), Path(gg).name)
+        ad = d / "adapter"
+        if ad.exists():
+            for f in sorted(ad.rglob("*")):
+                if f.is_file() and "checkpoint" not in f.relative_to(ad).parts[0]:
+                    z.write(f, "adapter/" + f.relative_to(ad).as_posix())
+    return out
+
+
+async def api_train_download(request):
+    name = safe_name(request.match_info["run"])
+    if not run_dir(name).exists():
+        return web.json_response({"error": "no such run"}, status=404)
+    out = _zip_run(name)
+    return web.FileResponse(out, headers={
+        "Content-Disposition": f'attachment; filename="{name}-model.zip"'})
+
+
+def register_train_routes(app):
+    app.router.add_post("/api/train/start", api_train_start)
+    app.router.add_post("/api/train/stop", api_train_stop)
+    app.router.add_get("/api/train/status", api_train_status)
+    app.router.add_get("/api/train/list", api_train_list)
+    app.router.add_post("/api/train/upload", api_train_upload)
+    app.router.add_get("/api/train/download/{run}", api_train_download)
+    app.router.add_post("/api/train/delete", api_train_delete)

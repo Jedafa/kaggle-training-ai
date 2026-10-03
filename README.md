@@ -1,1 +1,63 @@
-# kaggle-training-ai
+# ⚡ Kaggle Training AI
+
+Вторая планка проекта [kaggle-web](https://github.com/Jedafa/kaggle-web): та же веб-панель
+(терминал, статистика, Cloudflare-туннель, Ollama `/v1` прокси) **+ полный конвейер обучения своей модели**.
+
+English: the same Kaggle web panel (terminal, stats, tunnel, `/v1` proxy) plus a full
+train-your-own-model pipeline — dataset → QLoRA → GGUF → Ollama → HuggingFace.
+
+## Запуск
+
+1. Импортируй `kaggle_training_ai.ipynb` в Kaggle (File → Import Notebook).
+2. **Settings → Internet → ON**, ускоритель **GPU** (T4 x2 достаточно).
+3. Запусти ячейку → получишь **URL + пароль** → открой панель.
+4. Вкладка **Training**: датасет (ссылка или файл) → базовая модель → имя → **Start training**.
+
+## Конвейер обучения
+
+```
+датасет (url/файл) → парсинг (jsonl/json/csv/parquet/txt) → QLoRA 4-bit (T4)
+  → живой график loss в панели → merge adapter → GGUF (q8_0/f16)
+  → импорт в Ollama (ollama create, модель сразу в /v1)
+  → заливка на HuggingFace (GGUF + adapter, приватный репо)
+  → скачивание модели (.zip) из панели
+```
+
+- **Датасет**: ссылка или файл. Форматы: `{"instruction","output"}`, `{"messages":[...]}`, `{"text":...}`, CSV с колонками instruction/output или text.
+- **Базовая модель**: любой HF id (по умолчанию `unsloth/Llama-3.2-3B-Instruct`, влезает в T4 4-bit).
+- **Дообучение**: вкладка Models → «Continue» — загрузит адаптер прошлого рана и продолжит.
+- **Название модели**: задаёшь ты (run name = имя в ollama и на HF).
+- **HF**: токен в Settings → панель сама зальёт GGUF и адаптер в приватный репо `<user>/<run>`.
+- **Скачивание**: кнопка Download — zip с GGUF + адаптером.
+- Запуск где угодно: скачай GGUF с HF → `ollama create my-model -f Modelfile` (`FROM model.gguf`) → `/v1`.
+
+## Панель
+
+- **Training** — датасет, параметры, график loss, прогресс, экспорт.
+- **Terminal** — общий bash (PTY), кнопки и действия печатаются прямо в него.
+- **Models** — прогоны, быстрый чат-тест любой модели, список Ollama.
+- **Settings** — туннель (quick/token/config), порт, пароль панели, HF-токен, git pull.
+- Справа — статистика: CPU / RAM / диск / все GPU (util + VRAM по каждой).
+- EN / RU / 中文, тёмная тема в стиле Linear, пароль-защита.
+
+## Безопасность
+
+- Панель слушает только 127.0.0.1 — наружу только через туннель и по паролю.
+- Пароль панели = API-ключ для `/ollama/*` (`Authorization: Bearer <password>`).
+- HF-репозиторий создаётся приватным.
+- Перед тренировкой Ollama останавливается (VRAM нужна тренеру) и поднимается обратно после импорта.
+- Сессия Kaggle ~9-12 ч. Для фоновой работы без 40-минутного простоя используй
+  **Save Version → Save & Run All** (последняя ячейка keep-alive держит прогон до лимита).
+
+## Файлы
+
+```
+server.py            — панель: терминал, статистика, туннель, ollama-прокси, train API
+trainer.py           — конвейер обучения (QLoRA → GGUF → Ollama → HF), детached-процесс
+train_api.py         — API тренировок: старт/стоп/статус/загрузка датасетов/экспорт
+static/              — Linear-style UI
+kaggle_training_ai.ipynb — лаунчер для Kaggle
+```
+
+Ран-данные живут в `~/.kaggle-panel/runs/<имя>/`: адаптер, merged, GGUF, логи.
+`TRAINER_FAKE=1` — симуляция всего конвейера без GPU (для тестов панели).

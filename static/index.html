@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kaggle Training AI</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23e4f222'/><path d='M30 72 L50 26 L70 72 M38 58 L62 58' stroke='%2308090a' stroke-width='7' fill='none' stroke-linecap='round'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;590&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+<link rel="stylesheet" href="/static/style.css?v=2">
+</head>
+<body>
+
+<!-- ===== login ===== -->
+<div id="login" class="overlay">
+  <div class="login-card" id="login-card">
+    <div class="login-logo">A</div>
+    <h1>Kaggle Training AI</h1>
+    <p class="sub" data-i18n="subtitle">train · serve · ship your own model</p>
+    <input id="login-pass" type="password" data-i18n-ph="password" placeholder="Password" autocomplete="current-password">
+    <button id="login-btn" class="btn btn-primary btn-block" style="margin-top:12px" data-i18n="login">Sign in</button>
+    <p id="login-err" class="err hidden" data-i18n="wrong_pass">Wrong password</p>
+    <p class="small muted" style="margin-top:12px" data-i18n="login_hint">The password is printed in the Kaggle notebook output.</p>
+  </div>
+</div>
+
+<!-- ===== app ===== -->
+<div id="app" class="hidden">
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">A</span><span>Kaggle Training AI</span></div>
+    <div class="top-actions">
+      <div class="conn-chip"><span class="dot" id="conn-dot"></span><span id="conn-label">—</span></div>
+      <div class="lang-switch">
+        <button data-lang="en">EN</button><button data-lang="ru">RU</button><button data-lang="zh">中文</button>
+      </div>
+      <button id="theme-toggle" class="icon-btn" title="Theme">◐</button>
+      <button id="logout" class="icon-btn" title="Log out">⎋</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- ===== nav ===== -->
+    <nav class="nav">
+      <div class="nav-title" data-i18n="nav_title">workspace</div>
+      <button class="nav-item active" data-view="training"><span class="nav-glyph">▲</span><span data-i18n="nav_training">Training</span></button>
+      <button class="nav-item" data-view="terminal"><span class="nav-glyph">⌨</span><span data-i18n="nav_terminal">Terminal</span></button>
+      <button class="nav-item" data-view="models"><span class="nav-glyph">◈</span><span data-i18n="nav_models">Models</span></button>
+      <button class="nav-item" data-view="settings"><span class="nav-glyph">⚙</span><span data-i18n="nav_settings">Settings</span></button>
+      <div class="nav-foot">kaggle-training-ai<br>v1.0 · linear ui</div>
+    </nav>
+
+    <!-- ===== main ===== -->
+    <main class="main">
+
+      <!-- TRAINING -->
+      <section class="view" id="view-training">
+        <div class="card">
+          <span class="step-num">01</span>
+          <h3 data-i18n="ds_title">Dataset</h3>
+          <p class="card-sub" data-i18n="ds_sub">jsonl / json / csv / parquet / txt — instruction+output, messages[] or raw text</p>
+          <div class="row wrap" style="margin-bottom:12px">
+            <button class="chip active" id="ds-mode-url" data-i18n="ds_link">Link</button>
+            <button class="chip" id="ds-mode-file" data-i18n="ds_file">File</button>
+            <span id="ds-info" class="badge"></span>
+          </div>
+          <div class="field" id="ds-url-wrap">
+            <input id="ds-url" type="text" placeholder="https://…/dataset.jsonl" spellcheck="false">
+          </div>
+          <div class="upload-row hidden" id="ds-file-wrap">
+            <span class="btn btn-ghost file-btn" style="position:relative">
+              <span data-i18n="ds_choose">Choose file…</span>
+              <input type="file" id="ds-file" accept=".jsonl,.json,.csv,.parquet,.txt">
+            </span>
+            <span id="ds-file-name" class="muted small">—</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <span class="step-num">02</span>
+          <h3 data-i18n="cfg_title">Model & run</h3>
+          <p class="card-sub" data-i18n="cfg_sub">QLoRA 4-bit — runs on T4 · adapter → merge → GGUF → Ollama → HuggingFace</p>
+          <div class="field">
+            <label data-i18n="f_base">Base model (HuggingFace id or local path)</label>
+            <input id="cfg-base" type="text" value="unsloth/Llama-3.2-3B-Instruct" spellcheck="false">
+            <div class="chips" id="base-presets"></div>
+          </div>
+          <div class="form-grid">
+            <div class="field"><label data-i18n="f_runname">Run / model name</label><input id="cfg-name" type="text" placeholder="my-model" spellcheck="false"></div>
+            <div class="field"><label data-i18n="f_epochs">Epochs</label><input id="cfg-epochs" type="number" value="3" min="1" step="1"></div>
+            <div class="field"><label data-i18n="f_lr">Learning rate</label><input id="cfg-lr" type="text" value="2e-4"></div>
+            <div class="field"><label data-i18n="f_batch">Batch size</label><input id="cfg-batch" type="number" value="2" min="1"></div>
+            <div class="field"><label data-i18n="f_accum">Grad accum</label><input id="cfg-accum" type="number" value="4" min="1"></div>
+            <div class="field"><label data-i18n="f_seq">Max seq len</label><input id="cfg-seq" type="number" value="1024" min="128" step="128"></div>
+            <div class="field"><label data-i18n="f_lora">LoRA rank</label><input id="cfg-lora" type="number" value="16" min="4"></div>
+            <div class="field"><label data-i18n="f_savesteps">Save every N steps</label><input id="cfg-save" type="number" value="100" min="10"></div>
+          </div>
+          <div class="field">
+            <label data-i18n="f_resume">Continue from (adapter of a previous run)</label>
+            <select id="cfg-resume"><option value="" data-i18n="f_resume_none">— fresh training —</option></select>
+          </div>
+          <div class="row wrap" style="margin-top:4px">
+            <label class="row" style="gap:6px;font-size:12.5px"><input type="checkbox" id="cfg-ollama" checked style="width:auto"> <span data-i18n="f_ollama">Import to Ollama</span></label>
+            <input id="cfg-ollama-name" type="text" placeholder="ollama model name" spellcheck="false" style="max-width:180px">
+            <label class="row" style="gap:6px;font-size:12.5px"><input type="checkbox" id="cfg-hf" style="width:auto"> <span data-i18n="f_hf">Upload to HuggingFace</span></label>
+            <input id="cfg-hf-repo" type="text" placeholder="user/my-model (optional)" spellcheck="false" style="max-width:200px">
+          </div>
+          <div class="row" style="margin-top:16px">
+            <button class="btn btn-primary" id="btn-train-start"><span data-i18n="btn_start">Start training</span></button>
+            <button class="btn btn-danger hidden" id="btn-train-stop"><span data-i18n="btn_stop">Stop</span></button>
+            <span id="train-badge" class="badge"></span>
+          </div>
+        </div>
+
+        <div class="card" id="progress-card">
+          <span class="step-num">03</span>
+          <h3 data-i18n="prog_title">Progress</h3>
+          <div class="progress-head" style="margin-top:10px">
+            <div class="stat-row" style="margin:0">
+              <div class="stat-cell"><span class="k">step</span><span class="v" id="p-step">0 / 0</span></div>
+              <div class="stat-cell"><span class="k">loss</span><span class="v" id="p-loss">—</span></div>
+              <div class="stat-cell"><span class="k">lr</span><span class="v" id="p-lr">—</span></div>
+              <div class="stat-cell"><span class="k">epoch</span><span class="v" id="p-epoch">—</span></div>
+              <div class="stat-cell"><span class="k">eta</span><span class="v" id="p-eta">—</span></div>
+            </div>
+          </div>
+          <div class="bar"><i id="p-bar"></i></div>
+          <canvas id="loss-chart" height="220"></canvas>
+          <div id="train-log" class="log-box" style="margin-top:12px"></div>
+        </div>
+
+        <div class="card" id="export-card">
+          <span class="step-num">04</span>
+          <h3 data-i18n="exp_title">Export</h3>
+          <div class="stat-row">
+            <div class="stat-cell"><span class="k" data-i18n="exp_gguf">GGUF</span><span class="v" id="e-gguf">—</span></div>
+            <div class="stat-cell"><span class="k">Ollama</span><span class="v" id="e-ollama">—</span></div>
+            <div class="stat-cell"><span class="k">HuggingFace</span><span class="v" id="e-hf">—</span></div>
+          </div>
+          <div class="row wrap">
+            <a class="btn btn-ghost hidden" id="e-download" download><span data-i18n="exp_download">Download model (.zip)</span></a>
+            <a class="btn btn-ghost hidden" id="e-hf-link" target="_blank" rel="noopener"><span>HF ↗</span></a>
+          </div>
+        </div>
+      </section>
+
+      <!-- TERMINAL -->
+      <section class="view hidden" id="view-terminal">
+        <div class="term-card">
+          <div class="term-head">
+            <span class="small mono">⌨ terminal</span>
+            <span class="small" data-i18n="term_hint">menu actions are typed here</span>
+          </div>
+          <div id="terminal"></div>
+        </div>
+      </section>
+
+      <!-- MODELS -->
+      <section class="view hidden" id="view-models">
+        <div class="card">
+          <h3 data-i18n="runs_title">Training runs</h3>
+          <p class="card-sub" data-i18n="runs_sub">every run keeps its adapter, merged model and GGUF — resume anytime</p>
+          <div id="runs-list" style="display:flex;flex-direction:column;gap:10px"></div>
+        </div>
+        <div class="card">
+          <h3 data-i18n="chat_title">Quick chat test</h3>
+          <p class="card-sub" data-i18n="chat_sub">any ollama model — same /v1 API your apps use</p>
+          <div class="chat-box">
+            <div class="row wrap">
+              <select id="chat-model" class="grow" style="max-width:260px"></select>
+              <input id="chat-max" type="number" value="256" min="16" max="2048" style="max-width:90px" title="max tokens">
+            </div>
+            <div id="chat-out" class="chat-out"><span class="muted small" data-i18n="chat_empty">answer appears here…</span></div>
+            <div class="chat-msg-row">
+              <input id="chat-input" type="text" data-i18n-ph="chat_ph" placeholder="ask something…" spellcheck="false">
+              <button class="btn btn-primary" id="chat-send">➤</button>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <h3 data-i18n="ollama_title">Ollama models</h3>
+          <div id="ollama-list" class="kv"></div>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section class="view hidden" id="view-settings">
+        <div class="card">
+          <h3 data-i18n="set_tunnel">Cloudflare tunnel</h3>
+          <div class="field"><label data-i18n="mode">Mode</label>
+            <select id="env-mode">
+              <option value="quick" data-i18n="mode_quick">Quick (random URL)</option>
+              <option value="token" data-i18n="mode_token">Named tunnel (token)</option>
+              <option value="config" data-i18n="mode_config">Config file (domain + UUID)</option>
+            </select>
+          </div>
+          <div class="field mode-token hidden"><label data-i18n="f_token">Tunnel token</label><input id="env-token" type="password" placeholder="eyJhIjoi..." spellcheck="false"></div>
+          <p class="muted small mode-token hidden" data-i18n="hint_token">Domain is configured in the Cloudflare Zero Trust dashboard → Public hostname → service http://localhost:PORT</p>
+          <div class="field mode-config hidden"><label data-i18n="f_domain">Domain</label><input id="env-domain" type="text" placeholder="panel.example.com" spellcheck="false"></div>
+          <div class="field mode-config hidden"><label data-i18n="f_uuid">Tunnel UUID</label><input id="env-uuid" type="text" spellcheck="false"></div>
+          <div class="field mode-config hidden"><label data-i18n="f_creds">Credentials JSON</label><textarea id="env-creds" rows="3" placeholder='{"AccountTag":"...","TunnelSecret":"...","TunnelID":"..."}' spellcheck="false"></textarea></div>
+          <div class="row wrap">
+            <button class="btn btn-primary" id="btn-tunnel-start"><span data-i18n="btn_tunnel_start">Start tunnel</span></button>
+            <button class="btn btn-ghost" id="btn-tunnel-stop"><span data-i18n="btn_tunnel_stop">Stop</span></button>
+            <div class="tunnel-chip grow hidden" id="tunnel-chip"><a id="tunnel-url" target="_blank" rel="noopener"></a><button id="tunnel-copy" class="icon-btn" style="width:24px;height:24px;font-size:11px">⧉</button></div>
+          </div>
+        </div>
+        <div class="card">
+          <h3 data-i18n="set_panel">Panel & services</h3>
+          <div class="form-grid">
+            <div class="field"><label data-i18n="f_port">Panel port</label><input id="env-port" type="number" value="7860"></div>
+            <div class="field"><label data-i18n="f_pass">Panel password</label><input id="env-pass" type="text" placeholder="••••••" spellcheck="false"></div>
+            <div class="field"><label data-i18n="f_hftoken">HuggingFace token</label><input id="env-hf" type="password" placeholder="hf_..." spellcheck="false"></div>
+          </div>
+          <div class="row wrap">
+            <button class="btn btn-primary" id="env-save"><span data-i18n="save">Save</span></button>
+            <button class="btn btn-ghost" id="btn-update"><span data-i18n="btn_update">Update panel (git pull)</span></button>
+            <span id="hf-state" class="badge"></span>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- ===== right rail ===== -->
+    <aside class="rail">
+      <div>
+        <h3 data-i18n="rail_server">server</h3>
+        <div class="stat"><div class="stat-head"><span data-i18n="cpu">CPU</span><b id="s-cpu-v">–</b></div><div class="bar-mono"><i id="s-cpu"></i></div></div>
+        <div class="stat"><div class="stat-head"><span data-i18n="ram">Memory</span><b id="s-ram-v">–</b></div><div class="bar-mono"><i id="s-ram"></i></div></div>
+        <div class="stat"><div class="stat-head"><span data-i18n="disk">Disk</span><b id="s-disk-v">–</b></div><div class="bar-mono"><i id="s-disk"></i></div></div>
+        <div id="gpu-list"></div>
+        <div class="kv">
+          <div><span data-i18n="load">Load</span><b id="s-load">–</b></div>
+          <div><span data-i18n="uptime">Uptime</span><b id="s-uptime">–</b></div>
+          <div><span data-i18n="host">Host</span><b id="s-host">–</b></div>
+        </div>
+      </div>
+      <div>
+        <h3 data-i18n="rail_training">training</h3>
+        <div class="stat"><div class="stat-head"><span id="rt-name" class="mono">—</span><b id="rt-loss">—</b></div></div>
+        <div class="bar-mono"><i id="rt-bar" style="width:0%"></i></div>
+        <div class="row" style="justify-content:space-between;margin-top:5px">
+          <span class="small muted mono" id="rt-step">0 / 0</span>
+          <span class="badge" id="rt-badge"></span>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<div id="toasts"></div>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<script src="/static/app.js?v=4"></script>
+</body>
+</html>
