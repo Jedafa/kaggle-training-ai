@@ -308,8 +308,14 @@ async def generate_job(cfg):
                         data = await r.json()
                     content = extract_content(data)
                 except Exception as e:
+                    emsg = str(e)
+                    if "token budget on thinking" in emsg and cfg["max_tokens"] < 32000:
+                        cfg["max_tokens"] = min(cfg["max_tokens"] * 2, 32000)
+                        write_state(message=f"reasoning ate the budget — retrying batch with max_tokens={cfg['max_tokens']}")
+                        log(f"escalating max_tokens to {cfg['max_tokens']}")
+                        continue
                     batch_errors += 1
-                    write_state(message=f"batch error ({batch_errors}): {str(e)[:160]} — retrying")
+                    write_state(message=f"batch error ({batch_errors}): {emsg[:160]} — retrying")
                     if batch_errors >= 5:
                         if written > 0:
                             log(f"API keeps failing — finishing with {written} samples")
