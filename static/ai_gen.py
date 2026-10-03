@@ -90,7 +90,8 @@ def build_system_prompt(cfg, refs):
                      "rewrite in your own words, do not copy verbatim):\n" + refs[:12000])
     parts.append(
         "OUTPUT RULES: return ONLY a JSON array of objects "
-        '{"instruction": "...", "output": "..."} — no markdown fences, no commentary. '
+        '{"instruction": "...", "output": "..."} — no markdown fences, no commentary, '
+        "NO thinking or reasoning text before/after the array. "
         "Each output must be a complete, correct, self-contained answer.")
     return "\n\n".join(parts)
 
@@ -104,30 +105,44 @@ def normalize_url(u):
 
 
 def extract_content(data):
-    """Pull the text out of an OpenAI-compatible or ollama-native response."""
+    """Pull the text out of an OpenAI-compatible or ollama-native response.
+    Surfaces provider errors (OpenRouter returns 200 + error object sometimes)
+    and reasoning-only responses with a clear hint."""
+    if isinstance(data, dict) and data.get("error"):
+        e = data["error"]
+        msg = e.get("message") if isinstance(e, dict) else str(e)
+        code = e.get("code") if isinstance(e, dict) else None
+        raise ValueError(f"API error{(' [' + str(code) + ']') if code else ''}: {msg}")
     ch = data.get("choices")
     if ch:
-        msg = (ch[0] or {}).get("message") or {}
-        c = msg.get("content")
+        msg0 = (ch[0] or {}).get("message") or {}
+        c = msg0.get("content")
         if c:
             return c
+        if msg0.get("reasoning"):
+            # thinking models put the final JSON inside the reasoning text — mine it
+            return msg0["reasoning"]
+        if ch[0] and (ch[0] or {}).get("finish_reason") == "error":
+            raise ValueError("provider failed to generate — try another model on this API")
     msg = data.get("message")  # ollama native /api/chat
     if isinstance(msg, dict) and msg.get("content"):
         return msg["content"]
-    raise ValueError("response has no message content — API URL must end with "
-                     "/v1/chat/completions (OpenAI-style) or /api/chat (ollama)")
+    raise ValueError("response has no message content — check the model name on this API "
+                     "(e.g. OpenRouter needs full ids like 'deepseek/deepseek-chat-v3.1:free')")
 
 
 def parse_items(text):
+    """Extract sample dicts even when the model wraps JSON in thinking/prose."""
     text = text.strip()
-    m = re.search(r"\[.*\]", text, re.S)
-    if m:
-        try:
-            arr = json.loads(m.group(0))
-            if isinstance(arr, list):
-                return [x for x in arr if isinstance(x, dict)]
-        except ValueError:
-            pass
+    dec = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch == "[":
+            try:
+                val, _end = dec.raw_decode(text, i)
+                if isinstance(val, list) and val and isinstance(val[0], dict):
+                    return [x for x in val if isinstance(x, dict)]
+            except ValueError:
+                continue
     items = []
     for line in text.splitlines():
         line = line.strip().rstrip(",")
@@ -176,14 +191,18 @@ async def generate_job(cfg):
                 if lines:
                     recent = [json.loads(x)["instruction"] for x in lines[-8:]]
                     user += "\nDo not repeat these existing instructions:\n" + "\n".join(recent)
+                write_state(message=f"calling {cfg['model']} for {need} samples… "
+                                    "(reasoning models can take a few minutes)")
+                payload = {"model": cfg["model"],
+                           "messages": [{"role": "system", "content": system},
+                                        {"role": "user", "content": user}],
+                           "temperature": cfg["temperature"],
+                           "max_tokens": cfg["max_tokens"], "stream": False}
+                if "openrouter.ai" in cfg["api_url"]:
+                    payload["reasoning"] = {"enabled": False}
                 try:
                     async with sess.post(
-                        cfg["api_url"],
-                        json={"model": cfg["model"],
-                              "messages": [{"role": "system", "content": system},
-                                           {"role": "user", "content": user}],
-                              "temperature": cfg["temperature"],
-                              "max_tokens": cfg["max_tokens"], "stream": False},
+                        cfg["api_url"], json=payload,
                         headers=headers) as r:
                         if r.status != 200:
                             body = (await r.text())[:200]
@@ -192,10 +211,13 @@ async def generate_job(cfg):
                     content = extract_content(data)
                 except Exception as e:
                     batch_errors += 1
-                    write_state(message=f"batch error ({batch_errors}): {str(e)[:160]}")
+                    write_state(message=f"batch error ({batch_errors}): {str(e)[:160]} — retrying")
                     if batch_errors >= 5:
-                        raise RuntimeError(f"too many API failures: {e}")
-                    await asyncio.sleep(3)
+                        if written > 0:
+                            log(f"API keeps failing — finishing with {written} samples")
+                            break
+                        raise RuntimeError(f"API keeps failing: {e}")
+                    await asyncio.sleep(3 * batch_errors)  # backoff
                     continue
 
                 items = parse_items(content)
@@ -320,7 +342,7 @@ async def api_ai_start(request):
         "count": max(1, min(int(body.get("count") or 50), 5000)),
         "batch": max(1, min(int(body.get("batch") or 10), 50)),
         "temperature": min(max(float(body.get("temperature") or 0.9), 0), 2),
-        "max_tokens": max(256, min(int(body.get("max_tokens") or 2500), 8000)),
+        "max_tokens": max(256, min(int(body.get("max_tokens") or 8000), 32000)),
         "auto_train": bool(body.get("auto_train", False)),
         "save_ds_hf": bool(body.get("save_ds_hf", True)),
         "hf_token": str(body.get("hf_token") or "").strip(),

@@ -120,8 +120,8 @@ def extract_content(data):
         if c:
             return c
         if msg0.get("reasoning"):
-            raise ValueError("model returned only reasoning tokens (content is null) — "
-                             "use a non-reasoning model for dataset generation")
+            # thinking models put the final JSON inside the reasoning text — mine it
+            return msg0["reasoning"]
         if ch[0] and (ch[0] or {}).get("finish_reason") == "error":
             raise ValueError("provider failed to generate — try another model on this API")
     msg = data.get("message")  # ollama native /api/chat
@@ -342,7 +342,7 @@ async def api_ai_start(request):
         "count": max(1, min(int(body.get("count") or 50), 5000)),
         "batch": max(1, min(int(body.get("batch") or 10), 50)),
         "temperature": min(max(float(body.get("temperature") or 0.9), 0), 2),
-        "max_tokens": max(256, min(int(body.get("max_tokens") or 6000), 16000)),
+        "max_tokens": max(256, min(int(body.get("max_tokens") or 8000), 32000)),
         "auto_train": bool(body.get("auto_train", False)),
         "save_ds_hf": bool(body.get("save_ds_hf", True)),
         "hf_token": str(body.get("hf_token") or "").strip(),
