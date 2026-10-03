@@ -385,9 +385,18 @@ def hf_dataset_info(repo, token=None):
                                       headers=_hf_headers(token))
         with urllib.request.urlopen(req2, timeout=25) as r:
             tree = json.loads(r.read().decode())
-        files = [f["path"] for f in tree
-                 if isinstance(f, dict) and f.get("type") == "file"
-                 and f["path"].lower().endswith(DATA_EXT)]
+        files_all = [f["path"] for f in tree
+                     if isinstance(f, dict) and f.get("type") == "file"
+                     and f["path"].lower().endswith(DATA_EXT)]
+        prio = {".jsonl": 0, ".csv": 1, ".parquet": 2, ".json": 3, ".txt": 4}
+        by_stem = {}
+        for p in files_all:
+            stem = re.sub(r"\.(jsonl|json|csv|parquet|txt)$", "", p, flags=re.I).lower()
+            ext = "." + p.rsplit(".", 1)[-1].lower()
+            cur = by_stem.get(stem)
+            if cur is None or prio.get(ext, 9) < prio.get("." + cur.rsplit(".", 1)[-1].lower(), 9):
+                by_stem[stem] = p
+        files = sorted(by_stem.values())
     except Exception as e:
         return {"repo": repo, "ok": False, "files": [], "error": "tree listing: " + str(e)[:150]}
     if not files:

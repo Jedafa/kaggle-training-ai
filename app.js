@@ -8,11 +8,18 @@ const I18N = {
     nav_title: "workspace", nav_training: "Training", nav_terminal: "Terminal", nav_models: "Models", nav_settings: "Settings",
     ds_title: "Dataset", ds_sub: "jsonl / json / csv / parquet / txt — instruction+output, messages[] or raw text",
     ds_link: "Link", ds_file: "File", ds_choose: "Choose file…",
+    ds_hf_check: "Check repos", ds_hf_hint: "one repo per line · green = ready · red = excluded",
+    ds_hf_need: "Add at least one repo", ds_hf_none_ready: "No ready datasets — fix red ones or remove them",
+    ds_copy: "copy to my HF",
     cfg_title: "Model & run", cfg_sub: "QLoRA 4-bit — runs on T4 · adapter → merge → GGUF → Ollama → HuggingFace",
     f_base: "Base model (HuggingFace id or local path)", f_runname: "Run / model name",
     f_epochs: "Epochs", f_lr: "Learning rate", f_batch: "Batch size", f_accum: "Grad accum",
     f_seq: "Max seq len", f_lora: "LoRA rank", f_savesteps: "Save every N steps",
-    f_resume: "Continue from (adapter of a previous run)", f_resume_none: "— fresh training —",
+    f_resume: "Продолжить с (адаптер прошлого рана)", f_resume_none: "— с нуля —",
+    f_scratch: "Обучение с нуля (без базовой модели)",
+    f_scratch_warn: "Честная математика: с нуля на паре ГБ данных получится игрушечная модель (простые связные тексты, уровень TinyStories) — для полезного ассистента оставь базовую модель. Поле базовой модели используется только как токенизатор.",
+    f_scratch: "Train from scratch (no base model)",
+    f_scratch_warn: "Honest math: from-scratch on a couple GB of data gives a toy-level model (simple coherent text, TinyStories-style) — for a useful assistant keep the base model. Base model field is used only as the tokenizer.",
     f_ollama: "Import to Ollama", f_hf: "Upload to HuggingFace",
     btn_start: "Start training", btn_stop: "Stop",
     prog_title: "Progress", eta: "eta",
@@ -63,6 +70,9 @@ const I18N = {
     nav_title: "рабочая область", nav_training: "Обучение", nav_terminal: "Терминал", nav_models: "Модели", nav_settings: "Настройки",
     ds_title: "Датасет", ds_sub: "jsonl / json / csv / parquet / txt — instruction+output, messages[] или сырой текст",
     ds_link: "Ссылка", ds_file: "Файл", ds_choose: "Выбрать файл…",
+    ds_hf_check: "Проверить репо", ds_hf_hint: "один репо на строку · зелёный = готов · красный = исключён",
+    ds_hf_need: "Добавь хотя бы один репо", ds_hf_none_ready: "Нет готовых датасетов — исправь красные или убери их",
+    ds_copy: "копия на мой HF",
     cfg_title: "Модель и запуск", cfg_sub: "QLoRA 4-bit — работает на T4 · адаптер → merge → GGUF → Ollama → HuggingFace",
     f_base: "Базовая модель (HuggingFace id или локальный путь)", f_runname: "Имя рана / модели",
     f_epochs: "Эпохи", f_lr: "Learning rate", f_batch: "Batch size", f_accum: "Grad accum",
@@ -118,11 +128,16 @@ const I18N = {
     nav_title: "工作区", nav_training: "训练", nav_terminal: "终端", nav_models: "模型", nav_settings: "设置",
     ds_title: "数据集", ds_sub: "jsonl / json / csv / parquet / txt — instruction+output、messages[] 或纯文本",
     ds_link: "链接", ds_file: "文件", ds_choose: "选择文件…",
+    ds_hf_check: "检查仓库", ds_hf_hint: "每行一个仓库 · 绿色 = 可训练 · 红色 = 排除",
+    ds_hf_need: "先添加至少一个仓库", ds_hf_none_ready: "没有可用的数据集 — 修正红色项或移除",
+    ds_copy: "复制到我的 HF",
     cfg_title: "模型与运行", cfg_sub: "QLoRA 4-bit — T4 可跑 · 适配器 → 合并 → GGUF → Ollama → HuggingFace",
     f_base: "基础模型（HuggingFace id 或本地路径）", f_runname: "运行 / 模型名称",
     f_epochs: "轮数", f_lr: "学习率", f_batch: "批次大小", f_accum: "梯度累积",
     f_seq: "最大序列长度", f_lora: "LoRA 秩", f_savesteps: "每 N 步保存",
     f_resume: "从上次运行继续（适配器）", f_resume_none: "— 全新训练 —",
+    f_scratch: "从零开始训练（无基础模型）",
+    f_scratch_warn: "坦白说：几 GB 数据从零训练只能得到玩具级模型（简单连贯文本，TinyStories 水平）— 要有用的助手请保留基础模型。基础模型字段仅用作分词器。",
     f_ollama: "导入 Ollama", f_hf: "上传到 HuggingFace",
     btn_start: "开始训练", btn_stop: "停止",
     prog_title: "进度", eta: "剩余",
@@ -426,12 +441,40 @@ BASE_PRESETS.forEach((m) => {
 });
 $("#ds-mode-url").addEventListener("click", () => setDsMode("url"));
 $("#ds-mode-file").addEventListener("click", () => setDsMode("file"));
+$("#ds-mode-hf").addEventListener("click", () => setDsMode("hf"));
 function setDsMode(m) {
   state.dsMode = m;
   $("#ds-mode-url").classList.toggle("active", m === "url");
   $("#ds-mode-file").classList.toggle("active", m === "file");
+  $("#ds-mode-hf").classList.toggle("active", m === "hf");
   $("#ds-url-wrap").classList.toggle("hidden", m !== "url");
   $("#ds-file-wrap").classList.toggle("hidden", m !== "file");
+  $("#ds-hf-wrap").classList.toggle("hidden", m !== "hf");
+}
+$("#ds-hf-check").addEventListener("click", async () => {
+  const repos = $("#ds-hf-repos").value.trim();
+  if (!repos) { toast(t("ds_hf_need")); return; }
+  $("#ds-hf-check").disabled = true;
+  try {
+    const d = await apiPost("/api/ds/hf_check", { repos });
+    state.hfResults = d.results || [];
+    renderHfList();
+  } catch { toast("⚠ " + t("toast_fail")); }
+  $("#ds-hf-check").disabled = false;
+});
+function renderHfList() {
+  const box = $("#ds-hf-list");
+  box.innerHTML = (state.hfResults || []).map((r, i) => {
+    const ok = r.ok && (r.files || []).length;
+    return `<div><span style="display:flex;align-items:center;gap:8px">
+      <input type="checkbox" class="ds-hf-keep" data-i="${i}" ${ok ? "checked" : "disabled"} style="width:auto">
+      <span class="badge ${ok ? "b-green" : "b-coral"}">${ok ? "✓ " + (r.files || []).length + " files" : "✗"}</span>
+      <b style="font-family:var(--mono);font-size:12px">${r.repo}</b></span>
+      <span class="small muted">${r.error || (r.files || []).slice(0, 3).join(", ")}</span></div>`;
+  }).join("");
+  box.querySelectorAll(".ds-hf-keep").forEach((cb) => cb.addEventListener("change", () => {
+    state.hfResults[+cb.dataset.i]._keep = cb.checked;
+  }));
 }
 $("#ds-file").addEventListener("change", async () => {
   const f = $("#ds-file").files[0];
@@ -452,10 +495,22 @@ $("#ds-file").addEventListener("change", async () => {
 });
 
 /* ---------------- training: start / stop / status ---------------- */
+$("#cfg-scratch").addEventListener("change", () => {
+  const on = $("#cfg-scratch").checked;
+  $("#cfg-scratch-size").classList.toggle("hidden", !on);
+  $("#scratch-warn").classList.toggle("hidden", !on);
+  modelInput.disabled = on;
+});
 $("#btn-train-start").addEventListener("click", async () => {
   const name = $("#cfg-name").value.trim();
   if (!name) { toast(t("toast_no_name")); return; }
-  const dsValue = state.dsMode === "url" ? $("#ds-url").value.trim() : state.uploadedName;
+  let dsValue = state.dsMode === "url" ? $("#ds-url").value.trim() : state.uploadedName;
+  let dsType = state.dsMode;
+  if (state.dsMode === "hf") {
+    const kept = (state.hfResults || []).filter((r) => r.ok && r._keep !== false && (r.files || []).length).map((r) => r.repo);
+    if (!kept.length) { toast(t("ds_hf_none_ready")); return; }
+    dsType = "hf"; dsValue = kept.join(",");
+  }
   if (!dsValue) { toast(t("toast_no_dataset")); return; }
   const body = {
     run_name: name,
@@ -519,6 +574,8 @@ function renderTrain(d) {
       if (ds > 0) $("#p-eta").textContent = fmtEta((st.total_steps - st.step) * (dt / ds));
     }
   } else $("#p-eta").textContent = "—";
+  $("#p-ds").textContent = st.current_dataset || "—";
+  $("#p-ds").title = st.current_dataset || "";
   $("#p-ck").textContent = st.last_ckpt_step ? "step " + st.last_ckpt_step : "—";
   $("#p-ckup").textContent = st.hf_uploading ? "…" : (st.last_ckpt_uploaded ? "step " + st.last_ckpt_uploaded : "—");
   const cke = $("#p-ck-err");
@@ -675,9 +732,16 @@ function fillResumeSelect(runs) {
   const sel = $("#cfg-resume");
   const cur = sel.value;
   const repo = $("#cfg-hf-repo").value.trim();
-  sel.innerHTML = `<option value="">${t("f_resume_none")}</option>` +
-    (repo ? `<option value="hf:${repo}">HF: ${repo} (${t("ckpt_resume_hf")})</option>` : "") +
-    runs.map((r) => `<option value="runs/${r.name}/adapter">${r.name}</option>`).join("");
+  let opts = `<option value="">${t("f_resume_none")}</option>`;
+  for (const r of runs) {
+    if (r.last_ckpt_step && r.last_ckpt_local) {
+      opts += `<option value="${r.last_ckpt_local}">${r.name} — ${t("ckpt_resume_step")} ${r.last_ckpt_step}</option>`;
+    } else if (r.adapter_dir) {
+      opts += `<option value="runs/${r.name}/adapter">${r.name} (${t("adapter")})</option>`;
+    }
+  }
+  if (repo) opts += `<option value="hf:${repo}">HF: ${repo} (${t("ckpt_resume_hf")})</option>`;
+  sel.innerHTML = opts;
   if (cur) sel.value = cur;
 }
 
@@ -787,6 +851,7 @@ $("#ai-start").addEventListener("click", async () => {
         save_steps: +$("#cfg-save").value || 100,
         save_minutes: +$("#cfg-savemin").value || 0,
         keep_ckpts: +$("#cfg-keepck").value || 2,
+        max_samples: +$("#cfg-maxsamp").value || 0,
         ckpt_upload: true,
         ollama_import: $("#cfg-ollama").checked,
         ollama_name: $("#cfg-ollama-name").value.trim() || $("#cfg-name").value.trim(),

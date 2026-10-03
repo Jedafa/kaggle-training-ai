@@ -148,8 +148,22 @@ def collect_sources(cfg, rank=0):
     out = []
     ds_list = cfg.get("hf_datasets") or []
     if cfg.get("dataset_type") == "hf" and ds_list:
+        prio = {".jsonl": 0, ".csv": 1, ".parquet": 2, ".json": 3, ".txt": 4}
         for repo in ds_list:
             files = hf_list_dataset_files(repo, tok)  # every rank lists (cheap)
+            # same data often ships as .jsonl + .parquet — keep one format per stem
+            by_stem = {}
+            for p in files:
+                stem = re.sub(r"\.(jsonl|json|csv|parquet|txt)$", "", p, flags=re.I).lower()
+                ext = "." + p.rsplit(".", 1)[-1].lower()
+                cur = by_stem.get(stem)
+                if cur is None or prio.get(ext, 9) < prio.get("." + cur.rsplit(".", 1)[-1].lower(), 9):
+                    by_stem[stem] = p
+            files = sorted(by_stem.values())
+            per_file_limit = None
+            ms = int(cfg.get("max_samples") or 0)
+            if ms and files:
+                per_file_limit = max(50, -(-ms // len(files)))  # split repo limit across files
             for path in files:
                 safe = re.sub(r"[^A-Za-z0-9._/-]", "_", path)
                 out_path = BASE / "uploads" / "hf" / safe.replace("/", "__")
@@ -161,16 +175,16 @@ def collect_sources(cfg, rank=0):
                         time.sleep(5)
                     if not out_path.exists():
                         raise RuntimeError(f"waiting for {out_path.name} timed out")
-                out.append((repo, out_path))
+                out.append((repo, out_path, per_file_limit))
         return out
     name = {"url": "downloaded", "file": Path(cfg["dataset_value"]).name,
             "hf": ",".join(ds_list)}.get(cfg["dataset_type"], "dataset")
     if rank == 0:
-        return [(name, fetch_dataset(cfg))]
+        return [(name, fetch_dataset(cfg), None)]
     t0 = time.time()
     while not Path(cfg["dataset_value"]).exists() and time.time() - t0 < 1200:
         time.sleep(5)
-    return [(name, Path(cfg["dataset_value"]))]
+    return [(name, Path(cfg["dataset_value"]), None)]
 
 
 def iter_dataset(path, tokenizer, max_seq):
@@ -243,9 +257,10 @@ def pack_sources(cfg, run, sources, tok, rank, world):
     max_s = int(cfg.get("max_samples") or 0)
     HARD_BLOCKS = 400_000
     hard_hit = False
-    for sname, spath in sources:
+    for sname, spath, slim in sources:
         try:
             n = 0
+            lim = slim if slim else max_s
             for text in iter_dataset(Path(spath), tok, max_seq):
                 if cur is not None and sname != cur and len(ids) >= max_seq:
                     blocks.append(ids[:max_seq]); src_of_block.append(cur)
@@ -269,7 +284,7 @@ def pack_sources(cfg, run, sources, tok, rank, world):
                 if n % 5000 == 0:
                     run.set_state(message=f"packing {sname}: {n} samples…",
                                   current_dataset=sname)
-                if hard_hit or (max_s and n >= max_s):
+                if hard_hit or (lim and n >= lim):
                     break
             log(f"source {'ok' if n else 'EMPTY'}: {sname} — {n} samples")
         except Exception as e:
